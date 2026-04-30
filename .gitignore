@@ -1,0 +1,26 @@
+# Editor swap / backup files
+*~
+\#*
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Packaging
+dist/
+build/
+*.egg-info/
+
+# uv
+.venv/
+
+# Testing & coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Lint / type checker caches
+.ruff_cache/
+.mypy_cache/
