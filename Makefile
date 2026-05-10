@@ -2,15 +2,21 @@
 help:
 	@echo "Available targets:"
 	@echo "  sync         - Create venv and install dependencies"
+	@echo "  install      - Install pre-commit hooks (depends on sync)"
 	@echo "  format       - Format code with ruff"
 	@echo "  lint         - Run all linters (ruff check + format check)"
 	@echo "  typecheck    - Run all type checkers (basedpyright + mypy)"
 	@echo "  check        - Run lint + typecheck (mirrors CI)"
+	@echo "  pre-commit   - Run all pre-commit hooks on all files"
 	@echo "  clean        - Remove caches and build artifacts"
 
 .PHONY: sync
 sync:
-	uv sync --group dev
+	uv sync --group dev --all-extras
+
+.PHONY: install
+install: sync
+	uv run pre-commit install
 
 .PHONY: format
 format:
@@ -40,6 +46,10 @@ typecheck: typecheck-basedpyright typecheck-mypy
 
 .PHONY: check
 check: lint typecheck
+
+.PHONY: pre-commit
+pre-commit:
+	uv run pre-commit run --all-files
 
 .PHONY: clean
 clean:
