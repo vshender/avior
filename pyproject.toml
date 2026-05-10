@@ -43,5 +43,8 @@ typeCheckingMode = "strict"
 
 [tool.mypy]
 files = ["src"]
+mypy_path = ["src"]
+explicit_package_bases = true
+namespace_packages = true
 python_version = "3.12"
 strict = true
