@@ -24,6 +24,9 @@ dev = [
     "basedpyright>=1.39",
     "mypy>=1.20",
     "pre-commit>=4.0",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=5.0",
     "ruff>=0.15",
 ]
 
@@ -37,14 +40,32 @@ select = ["E", "F", "I", "UP", "B", "W"]
 max-doc-length = 80
 
 [tool.basedpyright]
-include = ["src"]
+include = ["src", "tests"]
 pythonVersion = "3.12"
 typeCheckingMode = "strict"
 
 [tool.mypy]
-files = ["src"]
+files = ["src", "tests"]
 mypy_path = ["src"]
 explicit_package_bases = true
 namespace_packages = true
 python_version = "3.12"
 strict = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests/unit"]
+addopts = "-ra"
+
+[tool.coverage.run]
+source = ["src/avior"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "@runtime_checkable",
+]

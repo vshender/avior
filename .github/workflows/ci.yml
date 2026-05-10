@@ -39,3 +39,6 @@ jobs:
 
       - name: mypy
         run: uv run mypy
+
+      - name: pytest
+        run: uv run pytest tests/unit

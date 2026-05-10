@@ -1,14 +1,16 @@
 .PHONY: help
 help:
 	@echo "Available targets:"
-	@echo "  sync         - Create venv and install dependencies"
-	@echo "  install      - Install pre-commit hooks (depends on sync)"
-	@echo "  format       - Format code with ruff"
-	@echo "  lint         - Run all linters (ruff check + format check)"
-	@echo "  typecheck    - Run all type checkers (basedpyright + mypy)"
-	@echo "  check        - Run lint + typecheck (mirrors CI)"
-	@echo "  pre-commit   - Run all pre-commit hooks on all files"
-	@echo "  clean        - Remove caches and build artifacts"
+	@echo "  sync               - Create venv and install dependencies (with all extras)"
+	@echo "  install            - Install pre-commit hooks (depends on sync)"
+	@echo "  format             - Format code with ruff"
+	@echo "  lint               - Run all linters (ruff check + format check)"
+	@echo "  typecheck          - Run all type checkers (basedpyright + mypy)"
+	@echo "  test               - Run unit tests"
+	@echo "  coverage           - Run unit tests with coverage report"
+	@echo "  check              - Run lint + typecheck + test (mirrors CI)"
+	@echo "  pre-commit         - Run all pre-commit hooks on all files"
+	@echo "  clean              - Remove caches and build artifacts"
 
 .PHONY: sync
 sync:
@@ -44,8 +46,16 @@ typecheck-mypy:
 .PHONY: typecheck
 typecheck: typecheck-basedpyright typecheck-mypy
 
+.PHONY: test
+test:
+	uv run pytest tests/unit
+
+.PHONY: coverage
+coverage:
+	uv run pytest tests/unit --cov --cov-report=html --cov-report=term
+
 .PHONY: check
-check: lint typecheck
+check: lint typecheck test
 
 .PHONY: pre-commit
 pre-commit:
@@ -53,6 +63,6 @@ pre-commit:
 
 .PHONY: clean
 clean:
-	rm -rf .ruff_cache .mypy_cache build dist
+	rm -rf .ruff_cache .mypy_cache .pytest_cache htmlcov coverage.xml .coverage build dist
 	find . -type d -name __pycache__ -exec rm -rf {} +
 	find . -type d -name "*.egg-info" -exec rm -rf {} +
