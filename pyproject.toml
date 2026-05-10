@@ -29,7 +29,10 @@ dev = [
 target-version = "py312"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B"]
+select = ["E", "F", "I", "UP", "B", "W"]
+
+[tool.ruff.lint.pycodestyle]
+max-doc-length = 80
 
 [tool.basedpyright]
 include = ["src"]
