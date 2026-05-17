@@ -1,6 +1,7 @@
-# Editor swap / backup files
+# Editor swap / backup / lockfiles
 *~
 \#*
+.\#*
 
 # Python bytecode
 __pycache__/
