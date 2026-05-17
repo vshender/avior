@@ -7,6 +7,7 @@ help:
 	@echo "  lint               - Run all linters (ruff check + format check)"
 	@echo "  typecheck          - Run all type checkers (basedpyright + mypy)"
 	@echo "  test               - Run unit tests"
+	@echo "  test-integration   - Run integration tests (gated by ANTHROPIC_API_KEY; not in CI default)"
 	@echo "  coverage           - Run unit tests with coverage report"
 	@echo "  check              - Run lint + typecheck + test (mirrors CI)"
 	@echo "  pre-commit         - Run all pre-commit hooks on all files"
@@ -49,6 +50,10 @@ typecheck: typecheck-basedpyright typecheck-mypy
 .PHONY: test
 test:
 	uv run pytest tests/unit
+
+.PHONY: test-integration
+test-integration:
+	uv run pytest tests/integration
 
 .PHONY: coverage
 coverage:
