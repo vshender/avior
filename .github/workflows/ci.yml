@@ -41,4 +41,9 @@ jobs:
         run: uv run mypy
 
       - name: pytest
+        if: matrix.python-version != '3.12'
         run: uv run pytest tests/unit
+
+      - name: pytest with coverage gate
+        if: matrix.python-version == '3.12'
+        run: uv run pytest tests/unit --cov --cov-report=term

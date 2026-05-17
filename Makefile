@@ -57,7 +57,7 @@ test-integration:
 
 .PHONY: coverage
 coverage:
-	uv run pytest tests/unit --cov --cov-report=html --cov-report=term
+	uv run pytest tests/unit --cov --cov-report=term
 
 .PHONY: check
 check: lint typecheck test
