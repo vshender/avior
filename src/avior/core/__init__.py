@@ -7,6 +7,12 @@ directly (e.g., `from avior.core.messages import Role`).
 """
 
 from avior.core.agent import Agent
+from avior.core.exceptions import (
+    ProviderConnectionError,
+    ProviderError,
+    ProviderHTTPError,
+    ProviderResponseValidationError,
+)
 from avior.core.messages import Message, Part, Role, TextPart
 from avior.core.provider import ModelSettings, Provider
 from avior.core.runner import Runner
@@ -17,6 +23,10 @@ __all__ = [
     "ModelSettings",
     "Part",
     "Provider",
+    "ProviderConnectionError",
+    "ProviderError",
+    "ProviderHTTPError",
+    "ProviderResponseValidationError",
     "Role",
     "Runner",
     "TextPart",
