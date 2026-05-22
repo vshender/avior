@@ -6,6 +6,7 @@ reaching into individual modules. Sub-modules also remain importable
 directly (e.g., `from avior.core.messages import Role`).
 """
 
+from avior.core import _logging as _logging  # noqa: F401  (logging side effect)
 from avior.core.agent import Agent
 from avior.core.exceptions import (
     ProviderConnectionError,

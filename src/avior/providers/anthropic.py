@@ -6,6 +6,7 @@ Anthropic's Messages API.
 Install via the optional extra: `pip install avior[anthropic]`.
 """
 
+import logging
 from typing import Literal, assert_never
 
 try:
@@ -26,6 +27,8 @@ from avior.core.exceptions import (
 )
 from avior.core.messages import Message, TextPart
 from avior.core.provider import ModelSettings
+
+logger = logging.getLogger(__name__)
 
 _DEFAULT_MAX_TOKENS = 4096
 """Fallback `max_tokens` when `ModelSettings.max_tokens` is `None`."""
@@ -99,6 +102,8 @@ class AnthropicProvider:
             ProviderError: Any other unexpected failure from the Anthropic
                 SDK, preserved as `__cause__`.
         """
+
+        logger.debug("complete: model=%s, messages=%d", settings.model, len(messages))
 
         system, conversation = self._extract_system(messages)
         wire_messages = [self._to_wire(m) for m in conversation]

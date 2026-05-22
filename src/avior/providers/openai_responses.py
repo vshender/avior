@@ -10,6 +10,7 @@ server-side state is created.
 Install via the optional extra: `pip install avior[openai]`.
 """
 
+import logging
 from typing import Literal, assert_never
 
 try:
@@ -36,6 +37,8 @@ from avior.core.exceptions import (
 )
 from avior.core.messages import Message, TextPart
 from avior.core.provider import ModelSettings
+
+logger = logging.getLogger(__name__)
 
 type _OpenAIRole = Literal["user", "assistant"]
 """OpenAI Responses' per-message role union.
@@ -108,6 +111,8 @@ class OpenAIResponsesProvider:
             ProviderError: Any other unexpected failure from the OpenAI SDK,
                 preserved as `__cause__`.
         """
+
+        logger.debug("complete: model=%s, messages=%d", settings.model, len(messages))
 
         instructions, conversation = self._extract_instructions(messages)
         wire_input: ResponseInputParam = [self._to_wire(m) for m in conversation]
