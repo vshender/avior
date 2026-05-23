@@ -1,7 +1,7 @@
 """Native Anthropic provider adapter.
 
-Wraps `anthropic.AsyncAnthropic` and implements the `Provider` protocol against
-Anthropic's Messages API.
+Wraps `anthropic.AsyncAnthropic` and implements `Provider` against Anthropic's
+Messages API.
 
 Install via the optional extra: `pip install avior[anthropic]`.
 """
@@ -26,7 +26,7 @@ from avior.core.exceptions import (
     ProviderResponseValidationError,
 )
 from avior.core.messages import Message, TextPart
-from avior.core.provider import ModelSettings
+from avior.core.provider import ModelSettings, Provider
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +42,7 @@ parameter, so the per-message `role` is narrower than avior's canonical `Role`
 """
 
 
-class AnthropicProvider:
+class AnthropicProvider(Provider):
     """Async adapter to Anthropic's Messages API.
 
     Translates avior's canonical `Message` shape to and from Anthropic's wire
@@ -61,13 +61,21 @@ class AnthropicProvider:
 
         Args:
             client: A pre-built `AsyncAnthropic` instance.  Takes precedence
-                over `api_key` if both are supplied.
+                over `api_key` if both are supplied.  Lifecycle stays with the
+                caller; `aclose` will not close it.
             api_key: API key for a freshly constructed `AsyncAnthropic`.  If
                 both `client` and `api_key` are `None`, `AsyncAnthropic` reads
-                `ANTHROPIC_API_KEY` from the environment.
+                `ANTHROPIC_API_KEY` from the environment.  A self-constructed
+                client is closed by `aclose`.
         """
 
-        self._client = client if client is not None else AsyncAnthropic(api_key=api_key)
+        super().__init__()
+        if client is not None:
+            self._client = client
+            self._owns_client = False
+        else:
+            self._client = AsyncAnthropic(api_key=api_key)
+            self._owns_client = True
 
     async def complete(
         self,
@@ -143,6 +151,18 @@ class AnthropicProvider:
             if isinstance(block, TextBlock)
         ]
         return Message(role="assistant", parts=parts)
+
+    async def aclose(self) -> None:
+        """Close the underlying SDK client when this provider owns it.
+
+        No-op when the client was supplied by the caller via `client=` - its
+        lifecycle belongs to whoever passed it in.  Safe to call more than once:
+        `AsyncAnthropic.close` (and the httpx pool it delegates to) is itself
+        idempotent.
+        """
+
+        if self._owns_client:
+            await self._client.close()
 
     @staticmethod
     def _extract_system(

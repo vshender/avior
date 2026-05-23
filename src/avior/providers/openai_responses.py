@@ -1,7 +1,7 @@
 """Native OpenAI Responses provider adapter.
 
-Wraps `openai.AsyncOpenAI` and implements the `Provider` protocol against
-OpenAI's Responses API.
+Wraps `openai.AsyncOpenAI` and implements `Provider` against OpenAI's Responses
+API.
 
 Stateless wire: `store=False` is always passed and `previous_response_id` is
 not used.  avior treats the conversation transcript as user-owned; no
@@ -36,7 +36,7 @@ from avior.core.exceptions import (
     ProviderResponseValidationError,
 )
 from avior.core.messages import Message, TextPart
-from avior.core.provider import ModelSettings
+from avior.core.provider import ModelSettings, Provider
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +49,7 @@ parameter, so the per-message `role` is narrower than avior's canonical `Role`
 """
 
 
-class OpenAIResponsesProvider:
+class OpenAIResponsesProvider(Provider):
     """Async adapter to OpenAI's Responses API.
 
     Translates avior's canonical `Message` shape to and from OpenAI Responses
@@ -68,13 +68,21 @@ class OpenAIResponsesProvider:
 
         Args:
             client: A pre-built `AsyncOpenAI` instance.  Takes precedence over
-                `api_key` if both are supplied.
+                `api_key` if both are supplied.  Lifecycle stays with the
+                caller; `aclose` will not close it.
             api_key: API key for a freshly constructed `AsyncOpenAI`.  If both
                 `client` and `api_key` are `None`, `AsyncOpenAI` reads
-                `OPENAI_API_KEY` from the environment.
+                `OPENAI_API_KEY` from the environment.  A self-constructed
+                client is closed by `aclose`.
         """
 
-        self._client = client if client is not None else AsyncOpenAI(api_key=api_key)
+        super().__init__()
+        if client is not None:
+            self._client = client
+            self._owns_client = False
+        else:
+            self._client = AsyncOpenAI(api_key=api_key)
+            self._owns_client = True
 
     async def complete(
         self,
@@ -152,6 +160,18 @@ class OpenAIResponsesProvider:
                     if isinstance(content, ResponseOutputText):
                         parts.append(TextPart(text=content.text))
         return Message(role="assistant", parts=parts)
+
+    async def aclose(self) -> None:
+        """Close the underlying SDK client when this provider owns it.
+
+        No-op when the client was supplied by the caller via `client=` - its
+        lifecycle belongs to whoever passed it in.  Safe to call more than once:
+        `AsyncOpenAI.close` (and the httpx pool it delegates to)is itself
+        idempotent.
+        """
+
+        if self._owns_client:
+            await self._client.close()
 
     @staticmethod
     def _extract_instructions(

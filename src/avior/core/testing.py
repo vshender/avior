@@ -14,7 +14,7 @@ from inspect import isawaitable
 from typing import NamedTuple, Self
 
 from avior.core.messages import Message
-from avior.core.provider import ModelSettings
+from avior.core.provider import ModelSettings, Provider
 
 type StubResponse = str | Message
 """A scripted response. `str` is sugar for `Message.assistant(str)`."""
@@ -80,8 +80,8 @@ def _normalize_response(response: StubResponse) -> Message:
     return response
 
 
-class StubProvider:
-    """Programmable test double for the `Provider` protocol.
+class StubProvider(Provider):
+    """Programmable test double for the `Provider` abstraction.
 
     Three construction forms cover the common test scenarios. All forms
     record their invocations in `.calls` for test assertions.
@@ -128,10 +128,6 @@ class StubProvider:
        assert provider.calls[-1].messages[-1].text == "hello"
        assert provider.calls[-1].settings.model == "claude-3-5-sonnet"
        ```
-
-    `StubProvider` conforms to the `Provider` Protocol structurally (it
-    provides an `async def complete` method); no explicit base class is
-    needed.
     """
 
     def __init__(self, func: StubCallable) -> None:
@@ -142,6 +138,7 @@ class StubProvider:
                 `StubResponse` either directly or as an awaitable.
         """
 
+        super().__init__()
         self._func = func
         self.calls: list[StubCall] = []
 
@@ -234,3 +231,8 @@ class StubProvider:
             result = await result
 
         return _normalize_response(result)
+
+    async def aclose(self) -> None:
+        """No-op: the stub holds no real resources to release."""
+
+        pass

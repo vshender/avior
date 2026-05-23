@@ -27,18 +27,19 @@ async def test_runner_run_against_openai_returns_non_empty_text() -> None:
     """
 
     # GIVEN an agent using the real OpenAI Responses provider and a cheap model
-    agent = Agent(
-        provider=OpenAIResponsesProvider(),
-        instructions="Reply with one short word.",
-        model_settings=ModelSettings(
-            model="gpt-4.1-nano",
-            max_tokens=256,
-        ),
-    )
+    async with OpenAIResponsesProvider() as provider:
+        agent = Agent(
+            provider=provider,
+            instructions="Reply with one short word.",
+            model_settings=ModelSettings(
+                model="gpt-4.1-nano",
+                max_tokens=256,
+            ),
+        )
 
-    # WHEN we run a trivial prompt
-    reply = await Runner.run(agent, "Say hello.")
+        # WHEN we run a trivial prompt
+        reply = await Runner.run(agent, "Say hello.")
 
-    # THEN we get a non-empty text response
-    assert isinstance(reply, str)
-    assert reply.strip() != ""
+        # THEN we get a non-empty text response
+        assert isinstance(reply, str)
+        assert reply.strip() != ""

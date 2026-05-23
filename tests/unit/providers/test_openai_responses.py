@@ -470,3 +470,108 @@ async def test_complete_translates_other_openai_errors_to_provider_error() -> No
         await provider.complete([Message.user("hi")], _settings())
     assert type(exc_info.value) is ProviderError
     assert exc_info.value.__cause__ is openai_error
+
+
+# Lifecycle tests
+# -----------------------------------------------------------------------------
+
+
+def _provider_owning(
+    monkeypatch: pytest.MonkeyPatch,
+    client: AsyncMock,
+) -> OpenAIResponsesProvider:
+    """Construct a provider that "owns" a mock client.
+
+    Patches the `AsyncOpenAI` symbol in the provider module so that the
+    no-`client=` path yields the supplied mock - giving the test a handle on
+    the would-be-self-constructed client without making real network calls.
+    """
+
+    def _factory(**_: object) -> AsyncMock:
+        return client
+
+    monkeypatch.setattr("avior.providers.openai_responses.AsyncOpenAI", _factory)
+    return OpenAIResponsesProvider(api_key="fake")
+
+
+async def test_aclose_closes_self_constructed_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`aclose` closes the SDK client the provider constructed itself."""
+
+    # GIVEN a provider that constructed its own (mock) client
+    mock_client = AsyncMock()
+    provider = _provider_owning(monkeypatch, mock_client)
+
+    # WHEN `aclose` is awaited
+    await provider.aclose()
+
+    # THEN the underlying client is closed
+    mock_client.close.assert_awaited_once()
+
+
+async def test_aclose_leaves_user_supplied_client_open() -> None:
+    """`aclose` does not close clients supplied by the caller."""
+
+    # GIVEN a provider with a caller-supplied client
+    mock_client = AsyncMock()
+    provider = _provider(mock_client)
+
+    # WHEN `aclose` is awaited
+    await provider.aclose()
+
+    # THEN the caller-owned client is left alone
+    mock_client.close.assert_not_called()
+
+
+async def test_async_cm_exit_calls_aclose(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exiting `async with` runs `aclose` on the owning provider."""
+
+    # GIVEN a provider that owns its (mock) client
+    mock_client = AsyncMock()
+    provider = _provider_owning(monkeypatch, mock_client)
+
+    # WHEN used as an async context manager
+    async with provider:
+        pass
+
+    # THEN `aclose` ran (visible via the underlying `close` call)
+    mock_client.close.assert_awaited_once()
+
+
+async def test_async_cm_exit_leaves_user_supplied_client_open() -> None:
+    """`async with` on a user-supplied-client provider does not close it."""
+
+    # GIVEN a provider with a caller-supplied client
+    mock_client = AsyncMock()
+    provider = _provider(mock_client)
+
+    # WHEN used as an async context manager
+    async with provider:
+        pass
+
+    # THEN the caller-owned client is left alone
+    mock_client.close.assert_not_called()
+
+
+async def test_nested_async_cm_closes_only_on_outermost_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reference-counted `async with`: inner exit does not close the client."""
+
+    # GIVEN a provider that owns its (mock) client
+    mock_client = AsyncMock()
+    provider = _provider_owning(monkeypatch, mock_client)
+
+    # WHEN entered twice (nested `async with`)
+    async with provider:
+        async with provider:
+            # THEN inside the inner block the client is still open
+            mock_client.close.assert_not_called()
+        # AND after the inner exit the client is still open (refcount > 0)
+        mock_client.close.assert_not_called()
+
+    # AND after the outermost exit `aclose` has run exactly once
+    mock_client.close.assert_awaited_once()

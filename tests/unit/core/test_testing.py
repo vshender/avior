@@ -5,7 +5,7 @@ from collections.abc import Callable
 import pytest
 
 from avior.core.messages import Message
-from avior.core.provider import ModelSettings, Provider
+from avior.core.provider import ModelSettings
 from avior.core.testing import StubCall, StubProvider
 
 
@@ -13,19 +13,6 @@ def _settings(model: str = "test-model") -> ModelSettings:
     """Construct a minimal `ModelSettings` for use in tests."""
 
     return ModelSettings(model=model)
-
-
-async def test_stub_provider_conforms_to_provider_protocol() -> None:
-    """`StubProvider` satisfies the `@runtime_checkable` `Provider` Protocol."""
-
-    # GIVEN a stub built from the canonical callable form
-    provider = StubProvider(lambda _msgs, _settings: Message.assistant("ok"))
-
-    # WHEN it is checked against the `Provider` runtime protocol
-    is_provider = isinstance(provider, Provider)  # pyright: ignore[reportUnnecessaryIsInstance]
-
-    # THEN it conforms (the `complete` method is structurally sufficient)
-    assert is_provider
 
 
 async def test_stub_provider_canonical_callable_returns_message_directly() -> None:

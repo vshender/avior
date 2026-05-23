@@ -27,18 +27,19 @@ async def test_runner_run_against_anthropic_returns_non_empty_text() -> None:
     """
 
     # GIVEN an agent using the real Anthropic provider and a cheap model
-    agent = Agent(
-        provider=AnthropicProvider(),
-        instructions="Reply with one short word.",
-        model_settings=ModelSettings(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=64,
-        ),
-    )
+    async with AnthropicProvider() as provider:
+        agent = Agent(
+            provider=provider,
+            instructions="Reply with one short word.",
+            model_settings=ModelSettings(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=64,
+            ),
+        )
 
-    # WHEN we run a trivial prompt
-    reply = await Runner.run(agent, "Say hello.")
+        # WHEN we run a trivial prompt
+        reply = await Runner.run(agent, "Say hello.")
 
-    # THEN we get a non-empty text response
-    assert isinstance(reply, str)
-    assert reply.strip() != ""
+        # THEN we get a non-empty text response
+        assert isinstance(reply, str)
+        assert reply.strip() != ""
