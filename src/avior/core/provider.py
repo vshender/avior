@@ -1,12 +1,13 @@
 """LLM provider abstraction."""
 
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from types import TracebackType
 from typing import Self
 
 from pydantic import BaseModel, ConfigDict
 
-from avior.core.messages import Message
+from avior.core.messages import AssistantMessage, Message
 
 
 class ModelSettings(BaseModel):
@@ -53,9 +54,9 @@ class Provider(ABC):
     @abstractmethod
     async def complete(
         self,
-        messages: list[Message],
+        messages: Sequence[Message],
         settings: ModelSettings,
-    ) -> Message:
+    ) -> AssistantMessage:
         """Send `messages` to the model and return its response message.
 
         Args:
@@ -63,7 +64,7 @@ class Provider(ABC):
             settings: Per-call invocation settings.
 
         Returns:
-            The model's response as a `Message` with `role="assistant"`.
+            The model's response as an `AssistantMessage`.
         """
 
     @abstractmethod

@@ -13,14 +13,18 @@ from collections.abc import Awaitable, Callable, Sequence
 from inspect import isawaitable
 from typing import NamedTuple, Self
 
-from avior.core.messages import Message
+from avior.core.messages import AssistantMessage, Message, TextPart
 from avior.core.provider import ModelSettings, Provider
 
-type StubResponse = str | Message
-"""A scripted response. `str` is sugar for `Message.assistant(str)`."""
+type StubResponse = str | AssistantMessage
+"""A scripted response.
+
+A `str` is sugar for a single-`TextPart` `AssistantMessage` with
+`stop_reason="stop"`.
+"""
 
 type StubCallable = Callable[
-    [list[Message], ModelSettings],
+    [Sequence[Message], ModelSettings],
     StubResponse | Awaitable[StubResponse],
 ]
 """The canonical callable form a `StubProvider` dispatches to.
@@ -29,7 +33,7 @@ Receives the conversation and the model settings; returns a scripted
 response either synchronously or as an awaitable.
 """
 
-type StubPredicate = Callable[[list[Message]], bool]
+type StubPredicate = Callable[[Sequence[Message]], bool]
 """A predicate over the conversation, used by `from_predicates`."""
 
 
@@ -48,34 +52,23 @@ class StubCall(NamedTuple):
     call.
     """
 
-    messages: list[Message]
+    messages: Sequence[Message]
     settings: ModelSettings
 
 
-def _normalize_response(response: StubResponse) -> Message:
-    """Coerce a `str` to `Message.assistant`; validate role on `Message`.
+def _normalize_response(response: StubResponse) -> AssistantMessage:
+    """Coerce a `str` to a single-`TextPart` `AssistantMessage`.
 
     Args:
-        response: Either a raw string or an already-constructed `Message`.
+        response: Either a raw string or an already-constructed
+            `AssistantMessage`.
 
     Returns:
-        A `Message` ready to be returned from `Provider.complete`.
-
-    Raises:
-        AssertionError: If `response` is a `Message` with role other
-            than `"assistant"`. The `Provider.complete` contract
-            requires assistant-role responses.
+        An `AssistantMessage` ready to be returned from `Provider.complete`.
     """
 
     if isinstance(response, str):
-        return Message.assistant(response)
-
-    if response.role != "assistant":
-        raise AssertionError(
-            f"StubProvider responses must have role='assistant', "
-            f"got role={response.role!r}. The Provider.complete "
-            f"contract requires assistant-role responses."
-        )
+        return AssistantMessage(parts=[TextPart(text=response)], stop_reason="stop")
 
     return response
 
@@ -89,11 +82,11 @@ class StubProvider(Provider):
     1. **Canonical callable** - `StubProvider(lambda msgs, settings: ...)`
        gives full control over the response, including inspecting the
        conversation and settings. The callable may be sync or async, and
-       may return either a `str` (wrapped as `Message.assistant(str)`)
-       or a fully-formed `Message`.
+       may return either a `str` (wrapped as a single-`TextPart`
+       `AssistantMessage`) or a fully-formed `AssistantMessage`.
 
        ```python
-       def respond(messages: list[Message], _: ModelSettings) -> str:
+       def respond(messages: Sequence[Message], _: ModelSettings) -> str:
            return f"echo: {messages[-1].text}"
 
        provider = StubProvider(respond)
@@ -110,13 +103,13 @@ class StubProvider(Provider):
     3. **Predicate dispatch** - `StubProvider.from_predicates([(pred, resp),
        ...])` returns the response paired with the first matching
        predicate. Raises `AssertionError` if no predicate matches. The
-       predicate signature is `Callable[[list[Message]], bool]`; for
+       predicate signature is `Callable[[Sequence[Message]], bool]`; for
        settings-aware dispatch, use the canonical callable form instead.
 
        ```python
        provider = StubProvider.from_predicates([
            (lambda msgs: msgs[-1].text == "ping", "pong"),
-           (lambda msgs: msgs[-1].text == "hello", Message.assistant("hi")),
+           (lambda msgs: msgs[-1].text == "hello", "hi"),
        ])
        ```
 
@@ -147,8 +140,8 @@ class StubProvider(Provider):
         """Construct a stub that returns each response in order, one per call.
 
         Args:
-            responses: Sequence of scripted responses. `str` entries are
-                wrapped as `Message.assistant(str)`.
+            responses: Sequence of scripted responses.  `str` entries are
+                wrapped as single-`TextPart` `AssistantMessage`s.
 
         Returns:
             A `StubProvider` that pops one response per `complete` call.
@@ -162,7 +155,10 @@ class StubProvider(Provider):
         snapshot = list(responses)
         index = 0
 
-        def func(_messages: list[Message], _settings: ModelSettings) -> Message:
+        def func(
+            _messages: Sequence[Message],
+            _settings: ModelSettings,
+        ) -> AssistantMessage:
             nonlocal index
             if index >= len(snapshot):
                 raise AssertionError(
@@ -198,7 +194,10 @@ class StubProvider(Provider):
 
         snapshot = list(pairs)
 
-        def func(messages: list[Message], _settings: ModelSettings) -> Message:
+        def func(
+            messages: Sequence[Message],
+            _settings: ModelSettings,
+        ) -> AssistantMessage:
             for predicate, response in snapshot:
                 if predicate(messages):
                     return _normalize_response(response)
@@ -211,9 +210,9 @@ class StubProvider(Provider):
 
     async def complete(
         self,
-        messages: list[Message],
+        messages: Sequence[Message],
         settings: ModelSettings,
-    ) -> Message:
+    ) -> AssistantMessage:
         """Record the call, dispatch, and return the scripted response.
 
         Args:
@@ -221,7 +220,8 @@ class StubProvider(Provider):
             settings: Per-call model invocation settings.
 
         Returns:
-            The scripted `Message` produced by the dispatch callable.
+            The scripted `AssistantMessage` produced by the dispatch
+            callable.
         """
 
         self.calls.append(StubCall(messages=messages, settings=settings))

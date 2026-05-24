@@ -7,6 +7,7 @@ Install via the optional extra: `pip install avior[anthropic]`.
 """
 
 import logging
+from collections.abc import Sequence
 from typing import Literal, assert_never
 
 try:
@@ -26,7 +27,14 @@ from avior.core.exceptions import (
     ProviderHTTPError,
     ProviderResponseValidationError,
 )
-from avior.core.messages import Message, StopReason, TextPart
+from avior.core.messages import (
+    AssistantMessage,
+    Message,
+    StopReason,
+    SystemMessage,
+    TextPart,
+    UserMessage,
+)
 from avior.core.provider import ModelSettings, Provider
 
 logger = logging.getLogger(__name__)
@@ -38,8 +46,8 @@ type _AnthropicRole = Literal["user", "assistant"]
 """Anthropic's per-message role union.
 
 Anthropic's Messages API places system instructions in a top-level `system`
-parameter, so the per-message `role` is narrower than avior's canonical `Role`
-(which includes `"system"`).
+parameter, so the per-message `role` is narrower than avior's canonical
+`Message` (which also admits `SystemMessage`).
 """
 
 
@@ -80,20 +88,21 @@ class AnthropicProvider(Provider):
 
     async def complete(
         self,
-        messages: list[Message],
+        messages: Sequence[Message],
         settings: ModelSettings,
-    ) -> Message:
+    ) -> AssistantMessage:
         """Send `messages` to Claude and return the assistant's response.
 
         `max_tokens` falls back to 4096 when `settings.max_tokens is None`;
         `temperature` is forwarded only if explicitly set on `settings`.
 
         Args:
-            messages: Conversation transcript.  `system`-role messages are
-                lifted out of the transcript and passed as separate text blocks
-                in Anthropic's top-level `system` parameter; relative order
-                among non-`system` messages is preserved, but `system`-message
-                positioning is not (Anthropic's wire format does not support
+            messages: Conversation transcript.  `SystemMessage`s are lifted
+                out of the transcript and passed as separate text blocks in
+                Anthropic's top-level `system` parameter.  Relative order is
+                preserved within each group (system-among-system,
+                non-system-among-non-system), but the interleaving between the
+                two groups is lost (Anthropic's wire format does not support
                 per-position system instructions).
             settings: Per-call invocation settings.
 
@@ -152,7 +161,7 @@ class AnthropicProvider(Provider):
             if isinstance(block, TextBlock)
         ]
         stop_reason = self._map_stop_reason(response)
-        return Message(role="assistant", parts=parts, stop_reason=stop_reason)
+        return AssistantMessage(parts=parts, stop_reason=stop_reason)
 
     @staticmethod
     def _map_stop_reason(response: AnthropicMessage) -> StopReason:
@@ -188,47 +197,48 @@ class AnthropicProvider(Provider):
 
     @staticmethod
     def _extract_system(
-        messages: list[Message],
-    ) -> tuple[list[TextBlockParam] | None, list[Message]]:
-        """Pull all `system` messages out of the conversation.
+        messages: Sequence[Message],
+    ) -> tuple[list[TextBlockParam] | None, list[UserMessage | AssistantMessage]]:
+        """Pull all `SystemMessage`s out of the conversation.
 
-        Anthropic's Messages API does not accept `system` messages in the
+        Anthropic's Messages API does not accept system messages in the
         `messages` array; the canonical IR allows them anywhere, so the adapter
         collects them as separate `TextBlockParam`s for Anthropic's top-level
-        `system` parameter.  Empty `system` messages are skipped.
+        `system` parameter.  Empty system messages are skipped.
 
-        Returns `(blocks, rest)`; `blocks` is `None` when no non-empty `system`
+        Returns `(blocks, rest)`; `blocks` is `None` when no non-empty system
         message is present.
         """
 
         system_blocks: list[TextBlockParam] = []
-        rest: list[Message] = []
+        rest: list[UserMessage | AssistantMessage] = []
         for msg in messages:
-            if msg.role == "system":
-                if msg.text:
-                    system_blocks.append(TextBlockParam(type="text", text=msg.text))
-            else:
-                rest.append(msg)
+            match msg:
+                case SystemMessage():
+                    if msg.text:
+                        system_blocks.append(TextBlockParam(type="text", text=msg.text))
+                case UserMessage() | AssistantMessage():
+                    rest.append(msg)
+                case _:
+                    assert_never(msg)
 
         return (system_blocks or None), rest
 
     @staticmethod
-    def _to_wire(message: Message) -> MessageParam:
-        """Convert an avior `Message` to an Anthropic `MessageParam`.
+    def _to_wire(message: UserMessage | AssistantMessage) -> MessageParam:
+        """Convert an avior non-system `Message` to an Anthropic `MessageParam`.
 
-        System messages are not accepted - they are extracted into the
+        `SystemMessage`s are not accepted - they are extracted into the
         top-level `system` parameter by `_extract_system` upstream.
         """
 
-        assert message.role != "system", (
-            "System messages must be filtered out by `_extract_system` upstream."
-        )
-
-        match message.role:
-            case "user" | "assistant":
-                role: _AnthropicRole = message.role
+        match message:
+            case UserMessage():
+                role: _AnthropicRole = "user"
+            case AssistantMessage():
+                role = "assistant"
             case _:
-                assert_never(message.role)
+                assert_never(message)
 
         content: list[TextBlockParam] = [
             TextBlockParam(type="text", text=p.text) for p in message.parts

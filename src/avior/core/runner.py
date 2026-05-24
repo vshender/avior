@@ -6,7 +6,7 @@ from avior.core.exceptions import (
     MaxTokensExceededError,
     ModelRefusalError,
 )
-from avior.core.messages import Message
+from avior.core.messages import Message, SystemMessage, UserMessage
 
 
 class Runner:
@@ -30,9 +30,9 @@ class Runner:
             ModelRefusalError: The model itself declined to answer.
         """
 
-        messages = [
-            Message.system(agent.instructions),
-            Message.user(input),
+        messages: list[Message] = [
+            SystemMessage.from_text(agent.instructions),
+            UserMessage.from_text(input),
         ]
         response = await agent.provider.complete(messages, agent.model_settings)
 
@@ -55,7 +55,7 @@ class Runner:
                 raise MaxTokensExceededError(message)
             case "refusal":
                 raise ModelRefusalError(response.text or "")
-            case _:
+            case "stop":
                 pass
 
         return response.text or ""

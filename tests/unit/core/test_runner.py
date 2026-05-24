@@ -8,7 +8,12 @@ from avior.core.exceptions import (
     MaxTokensExceededError,
     ModelRefusalError,
 )
-from avior.core.messages import Message, TextPart
+from avior.core.messages import (
+    AssistantMessage,
+    SystemMessage,
+    TextPart,
+    UserMessage,
+)
 from avior.core.provider import ModelSettings
 from avior.core.runner import Runner
 from avior.core.testing import StubProvider
@@ -45,11 +50,10 @@ async def test_runner_run_prepends_system_message_with_agent_instructions() -> N
     # WHEN the runner is invoked
     await Runner.run(agent, "hello")
 
-    # THEN the first message sent to the provider is a system message
+    # THEN the first message sent to the provider is a `SystemMessage`
     # carrying the agent's instructions
     sent_messages = provider.calls[-1].messages
-    assert sent_messages[0].role == "system"
-    assert sent_messages[0].parts == [TextPart(text="you are helpful")]
+    assert sent_messages[0] == SystemMessage.from_text("you are helpful")
 
 
 async def test_runner_run_appends_user_message_with_input() -> None:
@@ -66,12 +70,11 @@ async def test_runner_run_appends_user_message_with_input() -> None:
     # WHEN the runner is invoked with a specific prompt
     await Runner.run(agent, "what is 2+2?")
 
-    # THEN the second message sent is a user message carrying the prompt,
+    # THEN the second message sent is a `UserMessage` carrying the prompt,
     # and exactly two messages are sent (system + user)
     sent_messages = provider.calls[-1].messages
     assert len(sent_messages) == 2
-    assert sent_messages[1].role == "user"
-    assert sent_messages[1].parts == [TextPart(text="what is 2+2?")]
+    assert sent_messages[1] == UserMessage.from_text("what is 2+2?")
 
 
 async def test_runner_run_passes_agent_model_settings_to_provider() -> None:
@@ -97,7 +100,7 @@ async def test_runner_run_returns_empty_string_when_response_has_no_text() -> No
     """`Runner.run` returns `""` when the response has no text parts."""
 
     # GIVEN an agent whose provider replies with an empty assistant message
-    empty_response = Message(role="assistant", parts=[])
+    empty_response = AssistantMessage(parts=[], stop_reason="stop")
     agent = Agent(
         provider=StubProvider(lambda _msgs, _settings: empty_response),
         instructions="you are helpful",
@@ -115,7 +118,7 @@ async def test_runner_run_raises_on_max_tokens_stop_reason() -> None:
     """`Runner.run` raises `MaxTokensExceededError` on max-tokens stop."""
 
     # GIVEN an agent whose provider returns a message marked `max_tokens`
-    truncated = Message(role="assistant", parts=[], stop_reason="max_tokens")
+    truncated = AssistantMessage(parts=[], stop_reason="max_tokens")
     agent = Agent(
         provider=StubProvider(lambda _msgs, _settings: truncated),
         instructions="you are helpful",
@@ -137,7 +140,7 @@ async def test_runner_run_max_tokens_message_omits_none_when_unset() -> None:
     """
 
     # GIVEN an agent with no explicit `max_tokens`, whose provider truncated
-    truncated = Message(role="assistant", parts=[], stop_reason="max_tokens")
+    truncated = AssistantMessage(parts=[], stop_reason="max_tokens")
     agent = Agent(
         provider=StubProvider(lambda _msgs, _settings: truncated),
         instructions="you are helpful",
@@ -155,7 +158,7 @@ async def test_runner_run_raises_on_content_filter_stop_reason() -> None:
     """`Runner.run` raises `ContentFilterError` on content-filter stop."""
 
     # GIVEN an agent whose provider returns a message marked `content_filter`
-    filtered = Message(role="assistant", parts=[], stop_reason="content_filter")
+    filtered = AssistantMessage(parts=[], stop_reason="content_filter")
     agent = Agent(
         provider=StubProvider(lambda _msgs, _settings: filtered),
         instructions="you are helpful",
@@ -173,8 +176,7 @@ async def test_runner_run_raises_on_refusal_stop_reason() -> None:
 
     # GIVEN an agent whose provider returns a refusal-marked message
     refusal_text = "I can't help with that."
-    refusal = Message(
-        role="assistant",
+    refusal = AssistantMessage(
         parts=[TextPart(text=refusal_text)],
         stop_reason="refusal",
     )
@@ -196,8 +198,7 @@ async def test_runner_run_accepts_normal_stop_reason() -> None:
     """`Runner.run` returns text when `stop_reason` is the normal `"stop"`."""
 
     # GIVEN an agent whose provider returns a normal completion
-    normal = Message(
-        role="assistant",
+    normal = AssistantMessage(
         parts=[TextPart(text="Hi!")],
         stop_reason="stop",
     )

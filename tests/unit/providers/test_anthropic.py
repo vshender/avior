@@ -23,7 +23,13 @@ from avior.core.exceptions import (
     ProviderHTTPError,
     ProviderResponseValidationError,
 )
-from avior.core.messages import Message, TextPart
+from avior.core.messages import (
+    AssistantMessage,
+    Message,
+    SystemMessage,
+    TextPart,
+    UserMessage,
+)
 from avior.core.provider import ModelSettings
 from avior.providers.anthropic import AnthropicProvider
 
@@ -121,10 +127,9 @@ async def test_provider_prefers_explicit_client_over_api_key() -> None:
         client=cast(AsyncAnthropic, mock_client),
         api_key="ignored",
     )
-    result = await provider.complete([Message.user("hello")], _settings())
+    result = await provider.complete([UserMessage.from_text("hello")], _settings())
 
     # THEN the supplied client handles the call (proven by its preset response)
-    assert result.role == "assistant"
     assert result.text == "Hi from supplied client"
 
 
@@ -140,10 +145,9 @@ async def test_complete_returns_assistant_message_parsed_from_response() -> None
     provider = _provider(mock_client)
 
     # WHEN `complete` is awaited
-    result = await provider.complete([Message.user("hello")], _settings())
+    result = await provider.complete([UserMessage.from_text("hello")], _settings())
 
     # THEN the result is the assistant message containing the response text
-    assert result.role == "assistant"
     assert result.text == "Hi!"
 
 
@@ -154,7 +158,10 @@ async def test_complete_sends_leading_system_message_as_top_level() -> None:
     # message
     mock_client = _mock_client_returning(_response("Hi!"))
     provider = _provider(mock_client)
-    messages = [Message.system("be helpful"), Message.user("hello")]
+    messages: list[Message] = [
+        SystemMessage.from_text("be helpful"),
+        UserMessage.from_text("hello"),
+    ]
 
     # WHEN `complete` is invoked
     await provider.complete(messages, _settings())
@@ -174,10 +181,10 @@ async def test_complete_passes_system_messages_as_separate_blocks() -> None:
     # GIVEN a mock client and messages with `system` messages at several spots
     mock_client = _mock_client_returning(_response("ok"))
     provider = _provider(mock_client)
-    messages = [
-        Message.system("first"),
-        Message.user("hi"),
-        Message.system("later"),
+    messages: list[Message] = [
+        SystemMessage.from_text("first"),
+        UserMessage.from_text("hi"),
+        SystemMessage.from_text("later"),
     ]
 
     # WHEN `complete` is invoked
@@ -201,12 +208,12 @@ async def test_complete_preserves_non_system_order_after_extraction() -> None:
     # GIVEN a mock client and messages interleaving `system` with user/assistant
     mock_client = _mock_client_returning(_response("ok"))
     provider = _provider(mock_client)
-    messages = [
-        Message.system("s1"),
-        Message.user("u1"),
-        Message.assistant("a1"),
-        Message.system("s2"),
-        Message.user("u2"),
+    messages: list[Message] = [
+        SystemMessage.from_text("s1"),
+        UserMessage.from_text("u1"),
+        AssistantMessage(parts=[TextPart(text="a1")], stop_reason="stop"),
+        SystemMessage.from_text("s2"),
+        UserMessage.from_text("u2"),
     ]
 
     # WHEN `complete` is invoked
@@ -228,7 +235,7 @@ async def test_complete_skips_empty_system_messages() -> None:
     # GIVEN a mock client and messages including an empty `system` message
     mock_client = _mock_client_returning(_response("ok"))
     provider = _provider(mock_client)
-    messages = [Message.system(""), Message.user("hi")]
+    messages: list[Message] = [SystemMessage.from_text(""), UserMessage.from_text("hi")]
 
     # WHEN `complete` is invoked
     await provider.complete(messages, _settings())
@@ -244,7 +251,7 @@ async def test_complete_omits_system_when_no_system_message() -> None:
     # GIVEN a mock client and messages without any system message
     mock_client = _mock_client_returning(_response("ok"))
     provider = _provider(mock_client)
-    messages = [Message.user("hello")]
+    messages = [UserMessage.from_text("hello")]
 
     # WHEN `complete` is invoked
     await provider.complete(messages, _settings())
@@ -264,7 +271,7 @@ async def test_complete_forwards_explicit_max_tokens_and_temperature() -> None:
     settings = _settings(max_tokens=2048, temperature=0.2)
 
     # WHEN `complete` is invoked
-    await provider.complete([Message.user("hi")], settings)
+    await provider.complete([UserMessage.from_text("hi")], settings)
 
     # THEN the Anthropic SDK call receives the exact values
     call_kwargs = mock_client.messages.create.call_args.kwargs
@@ -281,7 +288,7 @@ async def test_complete_defaults_max_tokens_to_4096_when_unset() -> None:
     settings = _settings(max_tokens=None)
 
     # WHEN `complete` is invoked
-    await provider.complete([Message.user("hi")], settings)
+    await provider.complete([UserMessage.from_text("hi")], settings)
 
     # THEN the Anthropic SDK call receives `max_tokens=4096`
     assert mock_client.messages.create.call_args.kwargs["max_tokens"] == 4096
@@ -296,7 +303,7 @@ async def test_complete_omits_temperature_when_unset() -> None:
     settings = _settings(temperature=None)
 
     # WHEN `complete` is invoked
-    await provider.complete([Message.user("hi")], settings)
+    await provider.complete([UserMessage.from_text("hi")], settings)
 
     # THEN the `temperature` kwarg is the `omit` sentinel
     kwargs = mock_client.messages.create.call_args.kwargs
@@ -311,7 +318,7 @@ async def test_complete_maps_each_response_text_block_to_a_part() -> None:
     provider = _provider(mock_client)
 
     # WHEN `complete` is awaited
-    result = await provider.complete([Message.user("hi")], _settings())
+    result = await provider.complete([UserMessage.from_text("hi")], _settings())
 
     # THEN the returned message has one `TextPart` per response block, in order
     assert result.parts == [TextPart(text="hello "), TextPart(text="world")]
@@ -325,10 +332,9 @@ async def test_complete_returns_empty_parts_when_response_content_is_empty() -> 
     provider = _provider(mock_client)
 
     # WHEN `complete` is awaited
-    result = await provider.complete([Message.user("hi")], _settings())
+    result = await provider.complete([UserMessage.from_text("hi")], _settings())
 
     # THEN the result has an empty parts list (not a single empty `TextPart`)
-    assert result.role == "assistant"
     assert result.parts == []
 
 
@@ -352,7 +358,7 @@ async def test_complete_translates_api_status_error_to_http_error() -> None:
     # THEN `ProviderHTTPError` is raised with the HTTP status, and the original
     # exception is preserved as `__cause__`
     with pytest.raises(ProviderHTTPError) as exc_info:
-        await provider.complete([Message.user("hi")], _settings())
+        await provider.complete([UserMessage.from_text("hi")], _settings())
     assert exc_info.value.status_code == 429
     assert exc_info.value.__cause__ is anthropic_error
 
@@ -373,7 +379,7 @@ async def test_complete_translates_response_validation_error() -> None:
     # THEN `ProviderResponseValidationError` is raised, with the original
     # exception preserved as `__cause__`
     with pytest.raises(ProviderResponseValidationError) as exc_info:
-        await provider.complete([Message.user("hi")], _settings())
+        await provider.complete([UserMessage.from_text("hi")], _settings())
     assert exc_info.value.__cause__ is anthropic_error
 
 
@@ -389,7 +395,7 @@ async def test_complete_translates_connection_error() -> None:
     # THEN `ProviderConnectionError` is raised with the original exception
     # preserved as `__cause__`
     with pytest.raises(ProviderConnectionError) as exc_info:
-        await provider.complete([Message.user("hi")], _settings())
+        await provider.complete([UserMessage.from_text("hi")], _settings())
     assert exc_info.value.__cause__ is anthropic_error
 
 
@@ -405,7 +411,7 @@ async def test_complete_translates_timeout_as_connection_error() -> None:
     # THEN `ProviderConnectionError` is raised (timeouts surface as
     # connection-level failures)
     with pytest.raises(ProviderConnectionError) as exc_info:
-        await provider.complete([Message.user("hi")], _settings())
+        await provider.complete([UserMessage.from_text("hi")], _settings())
     assert exc_info.value.__cause__ is anthropic_error
 
 
@@ -421,7 +427,7 @@ async def test_complete_translates_other_anthropic_errors_to_provider_error() ->
     # THEN `ProviderError` (the exact base class, not a subclass) is raised
     # with the original exception preserved as `__cause__`
     with pytest.raises(ProviderError) as exc_info:
-        await provider.complete([Message.user("hi")], _settings())
+        await provider.complete([UserMessage.from_text("hi")], _settings())
     assert type(exc_info.value) is ProviderError
     assert exc_info.value.__cause__ is anthropic_error
 
@@ -437,7 +443,7 @@ async def test_complete_sets_stop_reason_stop_on_end_turn() -> None:
     provider = _provider(_mock_client_returning(_response_with_stop_reason("end_turn")))
 
     # WHEN `complete` is awaited
-    result = await provider.complete([Message.user("hi")], _settings())
+    result = await provider.complete([UserMessage.from_text("hi")], _settings())
 
     # THEN the canonical `stop_reason` is `"stop"`
     assert result.stop_reason == "stop"
@@ -452,7 +458,7 @@ async def test_complete_maps_max_tokens_to_max_tokens_stop_reason() -> None:
     )
 
     # WHEN `complete` is awaited
-    result = await provider.complete([Message.user("hi")], _settings())
+    result = await provider.complete([UserMessage.from_text("hi")], _settings())
 
     # THEN the canonical `stop_reason` is `"max_tokens"`
     assert result.stop_reason == "max_tokens"
@@ -465,7 +471,7 @@ async def test_complete_maps_refusal_to_refusal_stop_reason() -> None:
     provider = _provider(_mock_client_returning(_response_with_stop_reason("refusal")))
 
     # WHEN `complete` is awaited
-    result = await provider.complete([Message.user("hi")], _settings())
+    result = await provider.complete([UserMessage.from_text("hi")], _settings())
 
     # THEN the canonical `stop_reason` is `"refusal"`
     assert result.stop_reason == "refusal"

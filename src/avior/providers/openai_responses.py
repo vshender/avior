@@ -11,6 +11,7 @@ Install via the optional extra: `pip install avior[openai]`.
 """
 
 import logging
+from collections.abc import Sequence
 from typing import Literal, assert_never
 
 try:
@@ -37,7 +38,14 @@ from avior.core.exceptions import (
     ProviderHTTPError,
     ProviderResponseValidationError,
 )
-from avior.core.messages import Message, StopReason, TextPart
+from avior.core.messages import (
+    AssistantMessage,
+    Message,
+    StopReason,
+    SystemMessage,
+    TextPart,
+    UserMessage,
+)
 from avior.core.provider import ModelSettings, Provider
 
 logger = logging.getLogger(__name__)
@@ -46,8 +54,8 @@ type _OpenAIRole = Literal["user", "assistant"]
 """OpenAI Responses' per-message role union.
 
 OpenAI Responses' API places system instructions in a top-level `instructions`
-parameter, so the per-message `role` is narrower than avior's canonical `Role`
-(which includes `"system"`).
+parameter, so the per-message `role` is narrower than avior's canonical
+`Message` (which also admits `SystemMessage`).
 """
 
 
@@ -88,9 +96,9 @@ class OpenAIResponsesProvider(Provider):
 
     async def complete(
         self,
-        messages: list[Message],
+        messages: Sequence[Message],
         settings: ModelSettings,
-    ) -> Message:
+    ) -> AssistantMessage:
         """Send `messages` to OpenAI Responses API and return the assistant's
         response.
 
@@ -99,12 +107,14 @@ class OpenAIResponsesProvider(Provider):
         when explicitly set on `settings`.
 
         Args:
-            messages: Conversation transcript.  `system`-role messages are
-                lifted out of the transcript and joined (newline-separated)
-                into OpenAI Responses' top-level `instructions` parameter
-                (see `_extract_instructions` for the rationale of this choice
-                over inline `role='system'` items).  Relative order among
-                non-`system` messages is preserved.
+            messages: Conversation transcript.  `SystemMessage`s are lifted
+                out of the transcript and joined (newline-separated) into
+                OpenAI Responses' top-level `instructions` parameter (see
+                `_extract_instructions` for the rationale of this choice over
+                inline `role='system'` items).  Relative order is preserved
+                within each group (system messages keep their order in the
+                joined string; non-system messages keep their order in
+                `input`), but the interleaving between the two groups is lost.
             settings: Per-call invocation settings.
 
         Returns:
@@ -173,7 +183,7 @@ class OpenAIResponsesProvider(Provider):
         # discriminator support.
         parts = refusal_parts or text_parts
         stop_reason = self._map_stop_reason(response, has_refusal=bool(refusal_parts))
-        return Message(role="assistant", parts=parts, stop_reason=stop_reason)
+        return AssistantMessage(parts=parts, stop_reason=stop_reason)
 
     @staticmethod
     def _map_stop_reason(response: Response, *, has_refusal: bool) -> StopReason:
@@ -222,9 +232,9 @@ class OpenAIResponsesProvider(Provider):
 
     @staticmethod
     def _extract_instructions(
-        messages: list[Message],
-    ) -> tuple[str | None, list[Message]]:
-        """Pull all `system` messages out of the conversation.
+        messages: Sequence[Message],
+    ) -> tuple[str | None, list[UserMessage | AssistantMessage]]:
+        """Pull all `SystemMessage`s out of the conversation.
 
         System content is lifted to the top-level `instructions` parameter
         rather than passed inline as `role='system'` items in `input` (the API
@@ -233,43 +243,45 @@ class OpenAIResponsesProvider(Provider):
         - lets OpenAI fold `instructions` to the `developer` role automatically
           for reasoning models (no per-model branching in the adapter)
 
-        `instructions` accepts a single string only, so multiple `system`
+        `instructions` accepts a single string only, so multiple system
         messages are collected (newline-separated) into one string.  Empty
-        `system` messages are skipped.
+        system messages are skipped.
 
         Returns `(instructions, rest)`; `instructions` is `None` when no
-        non-empty `system` message is present.
+        non-empty system message is present.
         """
 
         texts: list[str] = []
-        rest: list[Message] = []
+        rest: list[UserMessage | AssistantMessage] = []
         for msg in messages:
-            if msg.role == "system":
-                if msg.text:
-                    texts.append(msg.text)
-            else:
-                rest.append(msg)
+            match msg:
+                case SystemMessage():
+                    if msg.text:
+                        texts.append(msg.text)
+                case UserMessage() | AssistantMessage():
+                    rest.append(msg)
+                case _:
+                    assert_never(msg)
 
         return ("\n\n".join(texts) if texts else None), rest
 
     @staticmethod
-    def _to_wire(message: Message) -> EasyInputMessageParam:
-        """Convert an avior `Message` to an OpenAI Responses input item.
+    def _to_wire(message: UserMessage | AssistantMessage) -> EasyInputMessageParam:
+        """Convert an avior non-system `Message` to an OpenAI Responses input
+        item.
 
-        System messages are not accepted - they are extracted into the
+        `SystemMessage`s are not accepted - they are extracted into the
         top-level `instructions` parameter by `_extract_instructions`
         upstream.
         """
 
-        assert message.role != "system", (
-            "System messages must be filtered out by `_extract_instructions` upstream."
-        )
-
-        match message.role:
-            case "user" | "assistant":
-                role: _OpenAIRole = message.role
+        match message:
+            case UserMessage():
+                role: _OpenAIRole = "user"
+            case AssistantMessage():
+                role = "assistant"
             case _:
-                assert_never(message.role)
+                assert_never(message)
 
         return EasyInputMessageParam(
             role=role,

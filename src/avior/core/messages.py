@@ -1,17 +1,16 @@
 """Conversation transcript primitives.
 
 The avior canonical message format uses a three-role shape (`system`, `user`,
-`assistant`) modeled after Anthropic. Provider adapters are responsible for
-translating between this canonical form and the wire shape of the underlying
-API.
+`assistant`) modeled after Anthropic.  Each role is its own class so that fields
+meaningful only on certain roles (such as `stop_reason` on assistant turns) live
+exactly where they apply, making invalid states unrepresentable.  Provider
+adapters are responsible for translating between this canonical form and the
+wire shape of the underlying API.
 """
 
-from typing import Literal, Self
+from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict
-
-type Role = Literal["system", "user", "assistant"]
-"""The role of a `Message` in a conversation."""
+from pydantic import BaseModel, ConfigDict, Field
 
 type StopReason = Literal["stop", "max_tokens", "content_filter", "refusal"]
 """Canonical reason a model stopped producing output.
@@ -28,14 +27,11 @@ without branching on vendor specifics:
   in `parts`).  Distinct from `"content_filter"`: the model produced output
   explaining why it refused, the response is "successful" at the transport level
   but not the requested answer.
-
-Set by `Provider` adapters on every assistant message they return.  User- or
-system-constructed messages leave it as `None`.
 """
 
 
 class TextPart(BaseModel):
-    """A plain text content part of a `Message`."""
+    """A plain text content part of a message."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -44,50 +40,74 @@ class TextPart(BaseModel):
 
 
 type Part = TextPart
-"""A typed content part of a `Message`."""
+"""A typed content part of a message."""
 
 
-class Message(BaseModel):
-    """A single turn in the conversation transcript.
-
-    A `Message` has a role and a list of typed `Part`s.  Assistant-role messages
-    produced by a provider also carry a `stop_reason` describing why the model
-    stopped (see `StopReason`).
-
-    Convenience constructors `Message.system`, `Message.user`, and
-    `Message.assistant` cover the common single-`TextPart` case used by simple
-    agents.
-    """
+class SystemMessage(BaseModel):
+    """A `system`-role turn carrying instructions to the model."""
 
     model_config = ConfigDict(frozen=True)
 
-    role: Role
-    parts: list[Part]
-    stop_reason: StopReason | None = None
+    kind: Literal["system"] = "system"
+    parts: list[TextPart]
 
     @classmethod
-    def system(cls, text: str) -> Self:
-        """Construct a `system`-role message with a single `TextPart`."""
+    def from_text(cls, text: str) -> Self:
+        """Construct a system message with a single `TextPart`."""
 
-        return cls(role="system", parts=[TextPart(text=text)])
-
-    @classmethod
-    def user(cls, text: str) -> Self:
-        """Construct a `user`-role message with a single `TextPart`."""
-
-        return cls(role="user", parts=[TextPart(text=text)])
-
-    @classmethod
-    def assistant(cls, text: str) -> Self:
-        """Construct an `assistant`-role message with a single `TextPart`."""
-
-        return cls(role="assistant", parts=[TextPart(text=text)])
+        return cls(parts=[TextPart(text=text)])
 
     @property
     def text(self) -> str | None:
         """Concatenated text of all parts, or `None` if there are no parts."""
 
-        if not self.parts:
-            return None
+        return "".join(p.text for p in self.parts) if self.parts else None
 
-        return "".join(p.text for p in self.parts)
+
+class UserMessage(BaseModel):
+    """A `user`-role turn carrying the caller's input to the model."""
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal["user"] = "user"
+    parts: list[TextPart]
+
+    @classmethod
+    def from_text(cls, text: str) -> Self:
+        """Construct a user message with a single `TextPart`."""
+
+        return cls(parts=[TextPart(text=text)])
+
+    @property
+    def text(self) -> str | None:
+        """Concatenated text of all parts, or `None` if there are no parts."""
+
+        return "".join(p.text for p in self.parts) if self.parts else None
+
+
+class AssistantMessage(BaseModel):
+    """An `assistant`-role turn produced by a model.
+
+    Carries `stop_reason` describing why the model stopped (see `StopReason`).
+    `Provider` adapters always set `stop_reason` when constructing an assistant
+    message from a provider response.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal["assistant"] = "assistant"
+    parts: list[TextPart]
+    stop_reason: StopReason
+
+    @property
+    def text(self) -> str | None:
+        """Concatenated text of all parts, or `None` if there are no parts."""
+
+        return "".join(p.text for p in self.parts) if self.parts else None
+
+
+type Message = Annotated[
+    SystemMessage | UserMessage | AssistantMessage,
+    Field(discriminator="kind"),
+]
+"""A single turn in the conversation transcript.  Discriminated on `kind`."""
