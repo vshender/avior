@@ -1,6 +1,6 @@
 """Tests for `avior.providers.openai_responses`."""
 
-from typing import cast
+from typing import Literal, cast
 from unittest.mock import AsyncMock
 
 import httpx
@@ -18,8 +18,10 @@ from openai.types.responses import (
     Response,
     ResponseOutputItem,
     ResponseOutputMessage,
+    ResponseOutputRefusal,
     ResponseOutputText,
 )
+from openai.types.responses.response import IncompleteDetails
 
 from avior.core.exceptions import (
     ProviderConnectionError,
@@ -78,6 +80,49 @@ def _response(*texts: str) -> Response:
     )
 
 
+def _incomplete_response(
+    reason: Literal["max_output_tokens", "content_filter"],
+) -> Response:
+    """Build a `Response` with `status="incomplete"` and the given reason."""
+
+    return Response(
+        id="resp_test",
+        object="response",
+        created_at=0.0,
+        model="gpt-test",
+        output=[],
+        parallel_tool_calls=False,
+        tool_choice="auto",
+        tools=[],
+        status="incomplete",
+        incomplete_details=IncompleteDetails(reason=reason),
+    )
+
+
+def _refusal_response(refusal_text: str) -> Response:
+    """Build a completed `Response` whose message content is a refusal."""
+
+    return Response(
+        id="resp_test",
+        object="response",
+        created_at=0.0,
+        model="gpt-test",
+        output=[
+            ResponseOutputMessage(
+                id="msg_test",
+                type="message",
+                role="assistant",
+                status="completed",
+                content=[ResponseOutputRefusal(type="refusal", refusal=refusal_text)],
+            )
+        ],
+        parallel_tool_calls=False,
+        tool_choice="auto",
+        tools=[],
+        status="completed",
+    )
+
+
 def _mock_client_returning(response: Response) -> AsyncMock:
     """Mock `AsyncOpenAI` whose `responses.create` returns `response`."""
 
@@ -132,7 +177,8 @@ async def test_provider_prefers_explicit_client_over_api_key() -> None:
     result = await provider.complete([Message.user("hello")], _settings())
 
     # THEN the supplied client handles the call (proven by its preset response)
-    assert result == Message.assistant("Hi from supplied client")
+    assert result.role == "assistant"
+    assert result.text == "Hi from supplied client"
 
 
 # Behavioural tests on `complete()`
@@ -150,7 +196,8 @@ async def test_complete_returns_assistant_message_parsed_from_response() -> None
     result = await provider.complete([Message.user("hello")], _settings())
 
     # THEN the result is the assistant message containing the response text
-    assert result == Message.assistant("Hi!")
+    assert result.role == "assistant"
+    assert result.text == "Hi!"
 
 
 async def test_complete_lifts_leading_system_message_to_instructions() -> None:
@@ -470,6 +517,66 @@ async def test_complete_translates_other_openai_errors_to_provider_error() -> No
         await provider.complete([Message.user("hi")], _settings())
     assert type(exc_info.value) is ProviderError
     assert exc_info.value.__cause__ is openai_error
+
+
+# Stop-reason mapping tests
+# -----------------------------------------------------------------------------
+
+
+async def test_complete_sets_stop_reason_stop_on_normal_completion() -> None:
+    """`stop_reason="stop"` is set on a normal completed response."""
+
+    # GIVEN a mock client returning a normal completed response
+    provider = _provider(_mock_client_returning(_response("Hi!")))
+
+    # WHEN `complete` is awaited
+    result = await provider.complete([Message.user("hi")], _settings())
+
+    # THEN the returned message carries `stop_reason="stop"`
+    assert result.stop_reason == "stop"
+
+
+async def test_complete_maps_max_output_tokens_to_max_tokens_stop_reason() -> None:
+    """`incomplete_details.reason="max_output_tokens"` -> `"max_tokens"`."""
+
+    # GIVEN a mock client returning a response truncated at max-tokens
+    provider = _provider(
+        _mock_client_returning(_incomplete_response("max_output_tokens"))
+    )
+
+    # WHEN `complete` is awaited
+    result = await provider.complete([Message.user("hi")], _settings())
+
+    # THEN the canonical `stop_reason` is `"max_tokens"`
+    assert result.stop_reason == "max_tokens"
+
+
+async def test_complete_maps_content_filter_to_content_filter_stop_reason() -> None:
+    """`incomplete_details.reason="content_filter"` -> `"content_filter"`."""
+
+    # GIVEN a mock client returning an incomplete response due to content filter
+    provider = _provider(_mock_client_returning(_incomplete_response("content_filter")))
+
+    # WHEN `complete` is awaited
+    result = await provider.complete([Message.user("hi")], _settings())
+
+    # THEN the canonical `stop_reason` is `"content_filter"`
+    assert result.stop_reason == "content_filter"
+
+
+async def test_complete_maps_refusal_content_part_to_refusal_stop_reason() -> None:
+    """A `ResponseOutputRefusal` content part maps to canonical `"refusal"`."""
+
+    # GIVEN a mock client returning a completed response carrying a refusal part
+    provider = _provider(_mock_client_returning(_refusal_response("I can't help.")))
+
+    # WHEN `complete` is awaited
+    result = await provider.complete([Message.user("hi")], _settings())
+
+    # THEN the canonical `stop_reason` is `"refusal"` and the refusal text
+    # is preserved in `parts`
+    assert result.stop_reason == "refusal"
+    assert result.text == "I can't help."
 
 
 # Lifecycle tests

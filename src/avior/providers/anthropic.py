@@ -12,6 +12,7 @@ from typing import Literal, assert_never
 try:
     import anthropic
     from anthropic import AsyncAnthropic, Omit, omit
+    from anthropic.types import Message as AnthropicMessage
     from anthropic.types import MessageParam, TextBlock, TextBlockParam
 except ImportError as e:
     raise ImportError(
@@ -25,7 +26,7 @@ from avior.core.exceptions import (
     ProviderHTTPError,
     ProviderResponseValidationError,
 )
-from avior.core.messages import Message, TextPart
+from avior.core.messages import Message, StopReason, TextPart
 from avior.core.provider import ModelSettings, Provider
 
 logger = logging.getLogger(__name__)
@@ -150,7 +151,28 @@ class AnthropicProvider(Provider):
             for block in response.content
             if isinstance(block, TextBlock)
         ]
-        return Message(role="assistant", parts=parts)
+        stop_reason = self._map_stop_reason(response)
+        return Message(role="assistant", parts=parts, stop_reason=stop_reason)
+
+    @staticmethod
+    def _map_stop_reason(response: AnthropicMessage) -> StopReason:
+        """Map Anthropic's `stop_reason` to canonical `StopReason`.
+
+        - `"max_tokens"` -> `"max_tokens"` (output truncated at the cap).
+        - `"refusal"` -> `"refusal"` (the model itself declined; the
+          refusal text is present in `content` and lands in `parts`).
+        - Anything else (`"end_turn"`, `"stop_sequence"`, `"tool_use"`,
+          `"pause_turn"`, `None`) -> `"stop"`; the orchestrator treats the
+          response as normal completion and decides next steps from `parts`.
+        """
+
+        match response.stop_reason:
+            case "max_tokens":
+                return "max_tokens"
+            case "refusal":
+                return "refusal"
+            case _:
+                return "stop"
 
     async def aclose(self) -> None:
         """Close the underlying SDK client when this provider owns it.

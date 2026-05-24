@@ -1,6 +1,13 @@
 """Tests for `avior.core.runner`."""
 
+import pytest
+
 from avior.core.agent import Agent
+from avior.core.exceptions import (
+    ContentFilterError,
+    MaxTokensExceededError,
+    ModelRefusalError,
+)
 from avior.core.messages import Message, TextPart
 from avior.core.provider import ModelSettings
 from avior.core.runner import Runner
@@ -102,3 +109,106 @@ async def test_runner_run_returns_empty_string_when_response_has_no_text() -> No
 
     # THEN the result is an empty string (not `None`)
     assert result == ""
+
+
+async def test_runner_run_raises_on_max_tokens_stop_reason() -> None:
+    """`Runner.run` raises `MaxTokensExceededError` on max-tokens stop."""
+
+    # GIVEN an agent whose provider returns a message marked `max_tokens`
+    truncated = Message(role="assistant", parts=[], stop_reason="max_tokens")
+    agent = Agent(
+        provider=StubProvider(lambda _msgs, _settings: truncated),
+        instructions="you are helpful",
+        model_settings=ModelSettings(model="test-model", max_tokens=64),
+    )
+
+    # WHEN `Runner.run` is invoked
+    # THEN it raises `MaxTokensExceededError`
+    with pytest.raises(MaxTokensExceededError):
+        await Runner.run(agent, "hello")
+
+
+async def test_runner_run_max_tokens_message_omits_none_when_unset() -> None:
+    """The exception message stays human-readable when `max_tokens` is `None`.
+
+    When the user hasn't set `max_tokens` explicitly but the provider's default
+    cap was hit, the exception text must not say "budget (None)" - it should
+    describe the default-cap situation in actionable terms.
+    """
+
+    # GIVEN an agent with no explicit `max_tokens`, whose provider truncated
+    truncated = Message(role="assistant", parts=[], stop_reason="max_tokens")
+    agent = Agent(
+        provider=StubProvider(lambda _msgs, _settings: truncated),
+        instructions="you are helpful",
+        model_settings=ModelSettings(model="test-model"),  # max_tokens=None
+    )
+
+    # WHEN `Runner.run` is invoked
+    # THEN the exception is raised and the message does not leak "None"
+    with pytest.raises(MaxTokensExceededError) as exc_info:
+        await Runner.run(agent, "hello")
+    assert "None" not in str(exc_info.value)
+
+
+async def test_runner_run_raises_on_content_filter_stop_reason() -> None:
+    """`Runner.run` raises `ContentFilterError` on content-filter stop."""
+
+    # GIVEN an agent whose provider returns a message marked `content_filter`
+    filtered = Message(role="assistant", parts=[], stop_reason="content_filter")
+    agent = Agent(
+        provider=StubProvider(lambda _msgs, _settings: filtered),
+        instructions="you are helpful",
+        model_settings=ModelSettings(model="test-model"),
+    )
+
+    # WHEN `Runner.run` is invoked
+    # THEN it raises `ContentFilterError`
+    with pytest.raises(ContentFilterError):
+        await Runner.run(agent, "hello")
+
+
+async def test_runner_run_raises_on_refusal_stop_reason() -> None:
+    """`Runner.run` raises `ModelRefusalError` carrying the refusal text."""
+
+    # GIVEN an agent whose provider returns a refusal-marked message
+    refusal_text = "I can't help with that."
+    refusal = Message(
+        role="assistant",
+        parts=[TextPart(text=refusal_text)],
+        stop_reason="refusal",
+    )
+    agent = Agent(
+        provider=StubProvider(lambda _msgs, _settings: refusal),
+        instructions="you are helpful",
+        model_settings=ModelSettings(model="test-model"),
+    )
+
+    # WHEN `Runner.run` is invoked
+    # THEN `ModelRefusalError` is raised with the model's refusal text
+    # preserved on the exception
+    with pytest.raises(ModelRefusalError) as exc_info:
+        await Runner.run(agent, "hello")
+    assert exc_info.value.refusal_text == refusal_text
+
+
+async def test_runner_run_accepts_normal_stop_reason() -> None:
+    """`Runner.run` returns text when `stop_reason` is the normal `"stop"`."""
+
+    # GIVEN an agent whose provider returns a normal completion
+    normal = Message(
+        role="assistant",
+        parts=[TextPart(text="Hi!")],
+        stop_reason="stop",
+    )
+    agent = Agent(
+        provider=StubProvider(lambda _msgs, _settings: normal),
+        instructions="you are helpful",
+        model_settings=ModelSettings(model="test-model"),
+    )
+
+    # WHEN `Runner.run` is invoked
+    result = await Runner.run(agent, "hello")
+
+    # THEN the assistant's text is returned
+    assert result == "Hi!"

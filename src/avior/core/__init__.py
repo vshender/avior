@@ -1,20 +1,15 @@
 """Public API for `avior.core`.
 
-Re-exports the user-facing primitives so callers can write
+Re-exports the core runtime primitives so callers can write
 `from avior.core import Agent, Message, ModelSettings, Provider` without
-reaching into individual modules. Sub-modules also remain importable
+reaching into individual modules.  Exceptions live in `avior.core.exceptions`
+and are imported from there explicitly.  Submodules also remain importable
 directly (e.g., `from avior.core.messages import Role`).
 """
 
 from avior.core import _logging as _logging  # noqa: F401  (logging side effect)
 from avior.core.agent import Agent
-from avior.core.exceptions import (
-    ProviderConnectionError,
-    ProviderError,
-    ProviderHTTPError,
-    ProviderResponseValidationError,
-)
-from avior.core.messages import Message, Part, Role, TextPart
+from avior.core.messages import Message, Part, Role, StopReason, TextPart
 from avior.core.provider import ModelSettings, Provider
 from avior.core.runner import Runner
 
@@ -24,11 +19,8 @@ __all__ = [
     "ModelSettings",
     "Part",
     "Provider",
-    "ProviderConnectionError",
-    "ProviderError",
-    "ProviderHTTPError",
-    "ProviderResponseValidationError",
     "Role",
     "Runner",
+    "StopReason",
     "TextPart",
 ]

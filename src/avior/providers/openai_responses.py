@@ -19,8 +19,10 @@ try:
     from openai._types import Omit, omit
     from openai.types.responses import (
         EasyInputMessageParam,
+        Response,
         ResponseInputParam,
         ResponseOutputMessage,
+        ResponseOutputRefusal,
         ResponseOutputText,
     )
 except ImportError as e:
@@ -35,7 +37,7 @@ from avior.core.exceptions import (
     ProviderHTTPError,
     ProviderResponseValidationError,
 )
-from avior.core.messages import Message, TextPart
+from avior.core.messages import Message, StopReason, TextPart
 from avior.core.provider import ModelSettings, Provider
 
 logger = logging.getLogger(__name__)
@@ -153,13 +155,58 @@ class OpenAIResponsesProvider(Provider):
         except openai.OpenAIError as e:
             raise ProviderError(str(e)) from e
 
-        parts: list[TextPart] = []
+        text_parts: list[TextPart] = []
+        refusal_parts: list[TextPart] = []
         for item in response.output:
             if isinstance(item, ResponseOutputMessage):
                 for content in item.content:
-                    if isinstance(content, ResponseOutputText):
-                        parts.append(TextPart(text=content.text))
-        return Message(role="assistant", parts=parts)
+                    match content:
+                        case ResponseOutputText():
+                            text_parts.append(TextPart(text=content.text))
+                        case ResponseOutputRefusal():
+                            refusal_parts.append(TextPart(text=content.refusal))
+
+        # When the response interleaves text and refusal (rare in non-
+        # streaming), refusal wins: the refusal is the authoritative final
+        # word and the partial text attempt is dropped.  A `RefusalPart`
+        # type would let us keep both; deferred until parts gain richer
+        # discriminator support.
+        parts = refusal_parts or text_parts
+        stop_reason = self._map_stop_reason(response, has_refusal=bool(refusal_parts))
+        return Message(role="assistant", parts=parts, stop_reason=stop_reason)
+
+    @staticmethod
+    def _map_stop_reason(response: Response, *, has_refusal: bool) -> StopReason:
+        """Map OpenAI Responses signals to canonical `StopReason`.
+
+        Two channels are checked, in order:
+
+        1. `status == "incomplete"` with `incomplete_details.reason` -
+           `"max_output_tokens"` -> `"max_tokens"`, `"content_filter"` ->
+           `"content_filter"`.  Other reasons (or missing details) fall
+           through to (2).
+        2. A `ResponseOutputRefusal` content part on an otherwise completed
+           response - the model itself declined to answer.
+
+        Anything else maps to `"stop"`; the orchestrator treats the response as
+        a normal completion and decides what to do from `parts` alone.
+        """
+
+        if response.status == "incomplete":
+            details = response.incomplete_details
+            if details is not None:
+                match details.reason:
+                    case "max_output_tokens":
+                        return "max_tokens"
+                    case "content_filter":
+                        return "content_filter"
+                    case _:
+                        pass
+
+        if has_refusal:
+            return "refusal"
+
+        return "stop"
 
     async def aclose(self) -> None:
         """Close the underlying SDK client when this provider owns it.

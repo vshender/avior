@@ -1,7 +1,19 @@
-"""Exception types raised by `avior.core` and its subpackages."""
+"""Exception types raised by `avior.core` and its subpackages.
+
+Two independent trees sit under a common `AviorError` root:
+
+- `ProviderError` and subclasses cover transport / SDK failures - the provider
+  could not fulfill its contract (HTTP error, network failure, schema mismatch).
+- `AgentRunError` and subclasses cover failures during an agent run other
+  than transport-level provider failures.
+"""
 
 
-class ProviderError(Exception):
+class AviorError(Exception):
+    """Common root for every exception raised by avior."""
+
+
+class ProviderError(AviorError):
     """Base class for all `Provider` failures.
 
     `Provider` implementations translate vendor-specific SDK exceptions into
@@ -47,3 +59,60 @@ class ProviderResponseValidationError(ProviderError):
     shape the installed SDK doesn't yet understand.  The fix is usually to
     upgrade the SDK.
     """
+
+
+class AgentRunError(AviorError):
+    """Base class for failures during an agent run."""
+
+
+class MaxTokensExceededError(AgentRunError):
+    """The model hit the configured token budget before completing its reply.
+
+    Surfaces when `ModelSettings.max_tokens` (or the provider's default cap) is
+    reached and the response was truncated.  Typically actionable: raise
+    `max_tokens` or shorten the prompt.
+    """
+
+
+class ContentFilterError(AgentRunError):
+    """The provider's content filter blocked the response.
+
+    The filter is a server-side moderation classifier run by the provider
+    (OpenAI's safety system, Azure OpenAI's configurable content filter) that
+    screens the model's generated output against policy and zeroes it out on
+    violation.  The HTTP call still succeeds at the transport level, but no
+    usable content reaches the caller.  Surfaces on OpenAI's
+    `incomplete_details.reason == "content_filter"`.
+
+    Distinct from `ModelRefusalError`: the filter is moderation infrastructure
+    intervening *between* the model and the caller, not the model itself
+    deciding to refuse.  Not retryable as-is; revise the prompt or relax content
+    policy.
+    """
+
+
+class ModelRefusalError(AgentRunError):
+    """The model declined to answer the request.
+
+    Surfaces on Anthropic's `stop_reason == "refusal"` and OpenAI's
+    `ResponseOutputRefusal` content part.  Distinct from `ContentFilterError`:
+    the model itself decided to refuse.  Not retryable as-is; revise the prompt.
+
+    The model's refusal text - its own explanation for declining - is preserved
+    on `refusal_text` for logging, display, or programmatic inspection.
+    """
+
+    refusal_text: str
+    """The model-provided refusal text.  Empty string when the response carried
+    no refusal content (defensive default; should not happen in practice when
+    this exception is raised)."""
+
+    def __init__(self, refusal_text: str) -> None:
+        """Initialize with the model-provided refusal text.
+
+        The refusal text is used as the exception's string form so that
+        `str(exc)` shows the model's own words.
+        """
+
+        super().__init__(refusal_text)
+        self.refusal_text = refusal_text

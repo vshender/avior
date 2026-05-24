@@ -1,6 +1,6 @@
 """Tests for `avior.providers.anthropic`."""
 
-from typing import cast
+from typing import Literal, cast
 from unittest.mock import AsyncMock
 
 import httpx
@@ -49,6 +49,23 @@ def _response(*texts: str) -> AnthropicMessage:
         model="claude-test",
         content=[TextBlock(type="text", text=t) for t in texts],
         stop_reason="end_turn",
+        stop_sequence=None,
+        usage=Usage(input_tokens=0, output_tokens=0),
+    )
+
+
+def _response_with_stop_reason(
+    stop_reason: Literal["end_turn", "max_tokens", "refusal"],
+) -> AnthropicMessage:
+    """Build a minimal assistant response with the given `stop_reason`."""
+
+    return AnthropicMessage(
+        id="msg_test",
+        type="message",
+        role="assistant",
+        model="claude-test",
+        content=[TextBlock(type="text", text="…")],
+        stop_reason=stop_reason,
         stop_sequence=None,
         usage=Usage(input_tokens=0, output_tokens=0),
     )
@@ -107,7 +124,8 @@ async def test_provider_prefers_explicit_client_over_api_key() -> None:
     result = await provider.complete([Message.user("hello")], _settings())
 
     # THEN the supplied client handles the call (proven by its preset response)
-    assert result == Message.assistant("Hi from supplied client")
+    assert result.role == "assistant"
+    assert result.text == "Hi from supplied client"
 
 
 # Behavioural tests on `complete()`
@@ -125,7 +143,8 @@ async def test_complete_returns_assistant_message_parsed_from_response() -> None
     result = await provider.complete([Message.user("hello")], _settings())
 
     # THEN the result is the assistant message containing the response text
-    assert result == Message.assistant("Hi!")
+    assert result.role == "assistant"
+    assert result.text == "Hi!"
 
 
 async def test_complete_sends_leading_system_message_as_top_level() -> None:
@@ -405,6 +424,51 @@ async def test_complete_translates_other_anthropic_errors_to_provider_error() ->
         await provider.complete([Message.user("hi")], _settings())
     assert type(exc_info.value) is ProviderError
     assert exc_info.value.__cause__ is anthropic_error
+
+
+# Stop-reason mapping tests
+# -----------------------------------------------------------------------------
+
+
+async def test_complete_sets_stop_reason_stop_on_end_turn() -> None:
+    """Anthropic `stop_reason="end_turn"` maps to canonical `"stop"`."""
+
+    # GIVEN a mock client returning a normal end-of-turn response
+    provider = _provider(_mock_client_returning(_response_with_stop_reason("end_turn")))
+
+    # WHEN `complete` is awaited
+    result = await provider.complete([Message.user("hi")], _settings())
+
+    # THEN the canonical `stop_reason` is `"stop"`
+    assert result.stop_reason == "stop"
+
+
+async def test_complete_maps_max_tokens_to_max_tokens_stop_reason() -> None:
+    """Anthropic `stop_reason="max_tokens"` maps to canonical `"max_tokens"`."""
+
+    # GIVEN a mock client returning a max-tokens-truncated response
+    provider = _provider(
+        _mock_client_returning(_response_with_stop_reason("max_tokens"))
+    )
+
+    # WHEN `complete` is awaited
+    result = await provider.complete([Message.user("hi")], _settings())
+
+    # THEN the canonical `stop_reason` is `"max_tokens"`
+    assert result.stop_reason == "max_tokens"
+
+
+async def test_complete_maps_refusal_to_refusal_stop_reason() -> None:
+    """Anthropic `refusal` stop_reason maps to canonical `"refusal"`."""
+
+    # GIVEN a mock client returning a refusal response
+    provider = _provider(_mock_client_returning(_response_with_stop_reason("refusal")))
+
+    # WHEN `complete` is awaited
+    result = await provider.complete([Message.user("hi")], _settings())
+
+    # THEN the canonical `stop_reason` is `"refusal"`
+    assert result.stop_reason == "refusal"
 
 
 # Lifecycle tests
