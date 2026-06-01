@@ -18,8 +18,9 @@ from avior.core.messages import (
     TextPart,
     UserMessage,
 )
-from avior.core.provider import ModelSettings, Provider
+from avior.core.provider import ModelSettings, Provider, ProviderResponse
 from avior.core.runner import Runner
+from avior.core.usage import Usage
 
 __all__ = [
     "Agent",
@@ -28,9 +29,11 @@ __all__ = [
     "ModelSettings",
     "Part",
     "Provider",
+    "ProviderResponse",
     "Runner",
     "StopReason",
     "SystemMessage",
     "TextPart",
+    "Usage",
     "UserMessage",
 ]

@@ -15,6 +15,7 @@ try:
     from anthropic import AsyncAnthropic, Omit, omit
     from anthropic.types import Message as AnthropicMessage
     from anthropic.types import MessageParam, TextBlock, TextBlockParam
+    from anthropic.types import Usage as AnthropicUsage
 except ImportError as e:
     raise ImportError(
         "The `anthropic` package is required to use `avior.providers.anthropic`. "
@@ -35,7 +36,8 @@ from avior.core.messages import (
     TextPart,
     UserMessage,
 )
-from avior.core.provider import ModelSettings, Provider
+from avior.core.provider import ModelSettings, Provider, ProviderResponse
+from avior.core.usage import Usage
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +92,7 @@ class AnthropicProvider(Provider):
         self,
         messages: Sequence[Message],
         settings: ModelSettings,
-    ) -> AssistantMessage:
+    ) -> ProviderResponse:
         """Send `messages` to Claude and return the assistant's response.
 
         `max_tokens` falls back to 4096 when `settings.max_tokens is None`;
@@ -107,7 +109,8 @@ class AnthropicProvider(Provider):
             settings: Per-call invocation settings.
 
         Returns:
-            The assistant response message.
+            A `ProviderResponse` wrapping the assistant message together with
+            the call metadata.
 
         Raises:
             ProviderHTTPError: The provider returned a 4xx or 5xx HTTP response.
@@ -161,7 +164,40 @@ class AnthropicProvider(Provider):
             if isinstance(block, TextBlock)
         ]
         stop_reason = self._map_stop_reason(response)
-        return AssistantMessage(parts=parts, stop_reason=stop_reason)
+        return ProviderResponse(
+            message=AssistantMessage(parts=parts, stop_reason=stop_reason),
+            usage=self._map_usage(response.usage),
+            raw_usage=response.usage.model_dump(mode="json"),
+            response_id=response.id,
+            model=response.model,
+            provider_name="anthropic",
+        )
+
+    @staticmethod
+    def _map_usage(usage: AnthropicUsage) -> Usage:
+        """Map Anthropic's `Usage` to the canonical `Usage`.
+
+        - `input_tokens`: Anthropic reports the *non-cached* input only, with
+          cache reads / creation separate and additional; avior's `input_tokens`
+          includes its cache sub-slices, so they are folded back in.
+        - `cache_read_tokens` / `cache_write_tokens`: Anthropic's cache reads /
+          cache creation; `None` (unused cache) is coalesced to `0`.
+        - `reasoning_tokens`: stays `None` - Anthropic does not itemize
+          extended thinking out of `output_tokens`, so the count is genuinely
+          unknown, not `0`.
+
+        The provider-native usage (e.g. `server_tool_use`, cache-write TTL
+        split) is preserved on `ProviderResponse.raw_usage`.
+        """
+
+        cache_read = usage.cache_read_input_tokens or 0
+        cache_write = usage.cache_creation_input_tokens or 0
+        return Usage(
+            input_tokens=usage.input_tokens + cache_read + cache_write,
+            output_tokens=usage.output_tokens,
+            cache_read_tokens=cache_read,
+            cache_write_tokens=cache_write,
+        )
 
     @staticmethod
     def _map_stop_reason(response: AnthropicMessage) -> StopReason:

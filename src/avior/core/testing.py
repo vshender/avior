@@ -14,13 +14,17 @@ from inspect import isawaitable
 from typing import NamedTuple, Self
 
 from avior.core.messages import AssistantMessage, Message, TextPart
-from avior.core.provider import ModelSettings, Provider
+from avior.core.provider import ModelSettings, Provider, ProviderResponse
 
-type StubResponse = str | AssistantMessage
-"""A scripted response.
+type StubResponse = str | AssistantMessage | ProviderResponse
+"""A scripted response, in one of three forms:
 
-A `str` is sugar for a single-`TextPart` `AssistantMessage` with
-`stop_reason="stop"`.
+- A `str` is sugar for a single-`TextPart` `AssistantMessage` with
+  `stop_reason="stop"`.
+- An `AssistantMessage` is sugar for a `ProviderResponse` that wraps it with
+  no call metadata.
+- A `ProviderResponse` is used as-is, so a test can script the call metadata
+  it asserts on.
 """
 
 type StubCallable = Callable[
@@ -56,19 +60,24 @@ class StubCall(NamedTuple):
     settings: ModelSettings
 
 
-def _normalize_response(response: StubResponse) -> AssistantMessage:
-    """Coerce a `str` to a single-`TextPart` `AssistantMessage`.
+def _normalize_response(response: StubResponse) -> ProviderResponse:
+    """Coerce any scripted `StubResponse` to a `ProviderResponse`.
 
     Args:
-        response: Either a raw string or an already-constructed
-            `AssistantMessage`.
+        response: A raw string, an `AssistantMessage`, or a fully-formed
+            `ProviderResponse`.
 
     Returns:
-        An `AssistantMessage` ready to be returned from `Provider.complete`.
+        A `ProviderResponse` ready to be returned from `Provider.complete`.
+        The sugar forms (`str`, `AssistantMessage`) carry no call metadata.
     """
 
     if isinstance(response, str):
-        return AssistantMessage(parts=[TextPart(text=response)], stop_reason="stop")
+        message = AssistantMessage(parts=[TextPart(text=response)], stop_reason="stop")
+        return ProviderResponse(message=message)
+
+    if isinstance(response, AssistantMessage):
+        return ProviderResponse(message=response)
 
     return response
 
@@ -82,8 +91,9 @@ class StubProvider(Provider):
     1. **Canonical callable** - `StubProvider(lambda msgs, settings: ...)`
        gives full control over the response, including inspecting the
        conversation and settings. The callable may be sync or async, and
-       may return either a `str` (wrapped as a single-`TextPart`
-       `AssistantMessage`) or a fully-formed `AssistantMessage`.
+       may return any `StubResponse`: a `str` (wrapped as a single-`TextPart`
+       `AssistantMessage`), a fully-formed `AssistantMessage`, or a complete
+       `ProviderResponse` (to script the call metadata).
 
        ```python
        def respond(messages: Sequence[Message], _: ModelSettings) -> str:
@@ -158,16 +168,17 @@ class StubProvider(Provider):
         def func(
             _messages: Sequence[Message],
             _settings: ModelSettings,
-        ) -> AssistantMessage:
+        ) -> StubResponse:
             nonlocal index
             if index >= len(snapshot):
                 raise AssertionError(
                     f"StubProvider.from_responses exhausted after {index} "
                     f"call(s); was constructed with {len(snapshot)} response(s)."
                 )
+
             response = snapshot[index]
             index += 1
-            return _normalize_response(response)
+            return response
 
         return cls(func)
 
@@ -197,10 +208,11 @@ class StubProvider(Provider):
         def func(
             messages: Sequence[Message],
             _settings: ModelSettings,
-        ) -> AssistantMessage:
+        ) -> StubResponse:
             for predicate, response in snapshot:
                 if predicate(messages):
-                    return _normalize_response(response)
+                    return response
+
             raise AssertionError(
                 "StubProvider.from_predicates: no predicate matched the "
                 f"incoming conversation of {len(messages)} message(s)."
@@ -212,7 +224,7 @@ class StubProvider(Provider):
         self,
         messages: Sequence[Message],
         settings: ModelSettings,
-    ) -> AssistantMessage:
+    ) -> ProviderResponse:
         """Record the call, dispatch, and return the scripted response.
 
         Args:
@@ -220,8 +232,7 @@ class StubProvider(Provider):
             settings: Per-call model invocation settings.
 
         Returns:
-            The scripted `AssistantMessage` produced by the dispatch
-            callable.
+            The scripted response, normalized to a `ProviderResponse`.
         """
 
         self.calls.append(StubCall(messages=messages, settings=settings))

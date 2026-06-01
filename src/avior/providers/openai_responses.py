@@ -25,6 +25,7 @@ try:
         ResponseOutputMessage,
         ResponseOutputRefusal,
         ResponseOutputText,
+        ResponseUsage,
     )
 except ImportError as e:
     raise ImportError(
@@ -46,7 +47,8 @@ from avior.core.messages import (
     TextPart,
     UserMessage,
 )
-from avior.core.provider import ModelSettings, Provider
+from avior.core.provider import ModelSettings, Provider, ProviderResponse
+from avior.core.usage import Usage
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +100,7 @@ class OpenAIResponsesProvider(Provider):
         self,
         messages: Sequence[Message],
         settings: ModelSettings,
-    ) -> AssistantMessage:
+    ) -> ProviderResponse:
         """Send `messages` to OpenAI Responses API and return the assistant's
         response.
 
@@ -118,7 +120,8 @@ class OpenAIResponsesProvider(Provider):
             settings: Per-call invocation settings.
 
         Returns:
-            The assistant response message.
+            A `ProviderResponse` wrapping the assistant message together with
+            the call metadata.
 
         Raises:
             ProviderHTTPError: The provider returned a 4xx or 5xx HTTP response.
@@ -183,7 +186,59 @@ class OpenAIResponsesProvider(Provider):
         # discriminator support.
         parts = refusal_parts or text_parts
         stop_reason = self._map_stop_reason(response, has_refusal=bool(refusal_parts))
-        return AssistantMessage(parts=parts, stop_reason=stop_reason)
+        raw_usage = (
+            response.usage.model_dump(mode="json")
+            if response.usage is not None
+            else None
+        )
+        return ProviderResponse(
+            message=AssistantMessage(parts=parts, stop_reason=stop_reason),
+            usage=self._map_usage(response.usage),
+            raw_usage=raw_usage,
+            response_id=response.id,
+            model=response.model,
+            provider_name="openai",
+        )
+
+    @staticmethod
+    def _map_usage(usage: ResponseUsage | None) -> Usage | None:
+        """Map OpenAI's `ResponseUsage` to the canonical `Usage`, or `None` when
+        the response carries no usage (e.g. some incomplete responses).
+
+        OpenAI's totals already include their sub-slices, so they map directly:
+
+        - `input_tokens` / `output_tokens`: used as-is.
+        - `cache_read_tokens`: from `input_tokens_details.cached_tokens`.
+        - `cache_write_tokens`: `0` - OpenAI has no cache-write counter.
+        - `reasoning_tokens`: from `output_tokens_details.reasoning_tokens`.
+
+        avior's `total_tokens` is then derived (`input + output`) and equals
+        OpenAI's own reported `total_tokens` (a mismatch is logged below).
+        """
+
+        if usage is None:
+            return None
+
+        mapped = Usage(
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            cache_read_tokens=usage.input_tokens_details.cached_tokens,
+            reasoning_tokens=usage.output_tokens_details.reasoning_tokens,
+        )
+
+        # OpenAI reports its own total, which should match the total our mapped
+        # `Usage` derives.  If they ever diverge, warn rather than silently
+        # shipping a total that disagrees with the provider (whose own number
+        # stays in `raw_usage`).
+        if usage.total_tokens != mapped.total_tokens:
+            logger.warning(
+                "OpenAI reported total_tokens=%d != avior's derived total %d; "
+                "avior reports the derived total (provider's stays in raw_usage).",
+                usage.total_tokens,
+                mapped.total_tokens,
+            )
+
+        return mapped
 
     @staticmethod
     def _map_stop_reason(response: Response, *, has_refusal: bool) -> StopReason:
@@ -223,7 +278,7 @@ class OpenAIResponsesProvider(Provider):
 
         No-op when the client was supplied by the caller via `client=` - its
         lifecycle belongs to whoever passed it in.  Safe to call more than once:
-        `AsyncOpenAI.close` (and the httpx pool it delegates to)is itself
+        `AsyncOpenAI.close` (and the httpx pool it delegates to) is itself
         idempotent.
         """
 

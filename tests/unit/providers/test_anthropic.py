@@ -45,8 +45,11 @@ def _settings(
     return ModelSettings(model=model, max_tokens=max_tokens, temperature=temperature)
 
 
-def _response(*texts: str) -> AnthropicMessage:
-    """Build a minimal `anthropic.types.Message` response with text blocks."""
+def _response(*texts: str, usage: Usage | None = None) -> AnthropicMessage:
+    """Build a minimal `anthropic.types.Message` response with text blocks.
+
+    Pass `usage` to attach token usage (default: a zeroed `Usage`).
+    """
 
     return AnthropicMessage(
         id="msg_test",
@@ -56,7 +59,7 @@ def _response(*texts: str) -> AnthropicMessage:
         content=[TextBlock(type="text", text=t) for t in texts],
         stop_reason="end_turn",
         stop_sequence=None,
-        usage=Usage(input_tokens=0, output_tokens=0),
+        usage=usage if usage is not None else Usage(input_tokens=0, output_tokens=0),
     )
 
 
@@ -70,7 +73,7 @@ def _response_with_stop_reason(
         type="message",
         role="assistant",
         model="claude-test",
-        content=[TextBlock(type="text", text="…")],
+        content=[TextBlock(type="text", text="...")],
         stop_reason=stop_reason,
         stop_sequence=None,
         usage=Usage(input_tokens=0, output_tokens=0),
@@ -130,7 +133,7 @@ async def test_provider_prefers_explicit_client_over_api_key() -> None:
     result = await provider.complete([UserMessage.from_text("hello")], _settings())
 
     # THEN the supplied client handles the call (proven by its preset response)
-    assert result.text == "Hi from supplied client"
+    assert result.message.text == "Hi from supplied client"
 
 
 # Behavioural tests on `complete()`
@@ -148,7 +151,7 @@ async def test_complete_returns_assistant_message_parsed_from_response() -> None
     result = await provider.complete([UserMessage.from_text("hello")], _settings())
 
     # THEN the result is the assistant message containing the response text
-    assert result.text == "Hi!"
+    assert result.message.text == "Hi!"
 
 
 async def test_complete_sends_leading_system_message_as_top_level() -> None:
@@ -321,7 +324,7 @@ async def test_complete_maps_each_response_text_block_to_a_part() -> None:
     result = await provider.complete([UserMessage.from_text("hi")], _settings())
 
     # THEN the returned message has one `TextPart` per response block, in order
-    assert result.parts == [TextPart(text="hello "), TextPart(text="world")]
+    assert result.message.parts == [TextPart(text="hello "), TextPart(text="world")]
 
 
 async def test_complete_returns_empty_parts_when_response_content_is_empty() -> None:
@@ -335,7 +338,53 @@ async def test_complete_returns_empty_parts_when_response_content_is_empty() -> 
     result = await provider.complete([UserMessage.from_text("hi")], _settings())
 
     # THEN the result has an empty parts list (not a single empty `TextPart`)
-    assert result.parts == []
+    assert result.message.parts == []
+
+
+# Call-metadata mapping tests
+# -----------------------------------------------------------------------------
+
+
+async def test_complete_maps_usage_ids_and_model_onto_provider_response() -> None:
+    """`complete` maps Anthropic usage, response id, and model to wrapper."""
+
+    # GIVEN a mock client returning a response with the call metadata
+    response = _response(
+        "hi",
+        usage=Usage(
+            input_tokens=11,
+            output_tokens=7,
+            cache_read_input_tokens=5,
+            cache_creation_input_tokens=2,
+        ),
+    )
+    provider = _provider(_mock_client_returning(response))
+
+    # WHEN `complete` is awaited
+    result = await provider.complete([UserMessage.from_text("hi")], _settings())
+
+    # THEN usage is normalized: Anthropic's cache-excluding input (11) is
+    # widened to include the cache sub-slices (11 + 5 + 2 = 18), which remain
+    # available individually, and total is derived (18 + 7)
+    assert result.usage is not None
+    assert result.usage.input_tokens == 18
+    assert result.usage.output_tokens == 7
+    assert result.usage.cache_read_tokens == 5
+    assert result.usage.cache_write_tokens == 2
+    assert result.usage.total_tokens == 25
+
+    # AND reasoning stays None: Anthropic does not itemize it out of output, so
+    # it is unknown, not 0
+    assert result.usage.reasoning_tokens is None
+
+    # AND the provider-native usage is preserved beside the normalized counts
+    assert result.raw_usage is not None
+    assert result.raw_usage["input_tokens"] == 11
+
+    # AND the response id, served model, and provider name are populated
+    assert result.response_id == "msg_test"
+    assert result.model == "claude-test"
+    assert result.provider_name == "anthropic"
 
 
 # Exception translation tests
@@ -446,7 +495,7 @@ async def test_complete_sets_stop_reason_stop_on_end_turn() -> None:
     result = await provider.complete([UserMessage.from_text("hi")], _settings())
 
     # THEN the canonical `stop_reason` is `"stop"`
-    assert result.stop_reason == "stop"
+    assert result.message.stop_reason == "stop"
 
 
 async def test_complete_maps_max_tokens_to_max_tokens_stop_reason() -> None:
@@ -461,7 +510,7 @@ async def test_complete_maps_max_tokens_to_max_tokens_stop_reason() -> None:
     result = await provider.complete([UserMessage.from_text("hi")], _settings())
 
     # THEN the canonical `stop_reason` is `"max_tokens"`
-    assert result.stop_reason == "max_tokens"
+    assert result.message.stop_reason == "max_tokens"
 
 
 async def test_complete_maps_refusal_to_refusal_stop_reason() -> None:
@@ -474,7 +523,7 @@ async def test_complete_maps_refusal_to_refusal_stop_reason() -> None:
     result = await provider.complete([UserMessage.from_text("hi")], _settings())
 
     # THEN the canonical `stop_reason` is `"refusal"`
-    assert result.stop_reason == "refusal"
+    assert result.message.stop_reason == "refusal"
 
 
 # Lifecycle tests

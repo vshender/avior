@@ -3,11 +3,12 @@
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from types import TracebackType
-from typing import Self
+from typing import Any, Self
 
 from pydantic import BaseModel, ConfigDict
 
 from avior.core.messages import AssistantMessage, Message
+from avior.core.usage import Usage
 
 
 class ModelSettings(BaseModel):
@@ -23,6 +24,47 @@ class ModelSettings(BaseModel):
     model: str
     temperature: float | None = None
     max_tokens: int | None = None
+
+
+class ProviderResponse(BaseModel):
+    """Result of a single `Provider.complete` call.
+
+    Wraps the assistant message together with the call metadata.  This
+    metadata lives *beside* the message rather than inside it so that
+    `AssistantMessage` stays a clean transcript primitive: replay and test
+    transcripts carry no call-specific bookkeeping.
+
+    All metadata fields are optional; a provider populates what it can.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    message: AssistantMessage
+    """The assistant message produced by the call."""
+
+    usage: Usage | None = None
+    """Normalized token usage for the call, or `None` if the provider reported
+    none.
+    """
+
+    raw_usage: dict[str, Any] | None = None
+    """The provider's own usage payload as JSON-like data.  Per-call provenance
+    kept beside the normalized `usage`, for debugging / audit and for cost
+    tooling that prefers provider-native numbers.
+    """
+
+    response_id: str | None = None
+    """The model provider's id for this response.  For correlating with
+    provider-side logs and traces.
+    """
+
+    model: str | None = None
+    """The model the provider reports having served, which may differ from the
+    requested `ModelSettings.model` (alias resolution, fallback).
+    """
+
+    provider_name: str | None = None
+    """Name of the provider that produced this response."""
 
 
 class Provider(ABC):
@@ -56,15 +98,16 @@ class Provider(ABC):
         self,
         messages: Sequence[Message],
         settings: ModelSettings,
-    ) -> AssistantMessage:
-        """Send `messages` to the model and return its response message.
+    ) -> ProviderResponse:
+        """Send `messages` to the model and return its response.
 
         Args:
             messages: Conversation transcript to send to the model.
             settings: Per-call invocation settings.
 
         Returns:
-            The model's response as an `AssistantMessage`.
+            A `ProviderResponse` carrying the assistant message and the
+            call metadata.
         """
 
     @abstractmethod

@@ -20,8 +20,13 @@ from openai.types.responses import (
     ResponseOutputMessage,
     ResponseOutputRefusal,
     ResponseOutputText,
+    ResponseUsage,
 )
 from openai.types.responses.response import IncompleteDetails
+from openai.types.responses.response_usage import (
+    InputTokensDetails,
+    OutputTokensDetails,
+)
 
 from avior.core.exceptions import (
     ProviderConnectionError,
@@ -51,12 +56,13 @@ def _settings(
     return ModelSettings(model=model, max_tokens=max_tokens, temperature=temperature)
 
 
-def _response(*texts: str) -> Response:
+def _response(*texts: str, usage: ResponseUsage | None = None) -> Response:
     """Build a minimal `openai.types.responses.Response` with text items.
 
     One `ResponseOutputMessage` is emitted containing one `ResponseOutputText`
     per supplied text.  Empty `texts` produces a response with an empty
-    `output` list (no message item at all).
+    `output` list (no message item at all).  Pass `usage` to attach token
+    usage (default: none).
     """
 
     output: list[ResponseOutputItem] = []
@@ -83,6 +89,7 @@ def _response(*texts: str) -> Response:
         parallel_tool_calls=False,
         tool_choice="auto",
         tools=[],
+        usage=usage,
     )
 
 
@@ -183,7 +190,7 @@ async def test_provider_prefers_explicit_client_over_api_key() -> None:
     result = await provider.complete([UserMessage.from_text("hello")], _settings())
 
     # THEN the supplied client handles the call (proven by its preset response)
-    assert result.text == "Hi from supplied client"
+    assert result.message.text == "Hi from supplied client"
 
 
 # Behavioural tests on `complete()`
@@ -201,7 +208,7 @@ async def test_complete_returns_assistant_message_parsed_from_response() -> None
     result = await provider.complete([UserMessage.from_text("hello")], _settings())
 
     # THEN the result is the assistant message containing the response text
-    assert result.text == "Hi!"
+    assert result.message.text == "Hi!"
 
 
 async def test_complete_lifts_leading_system_message_to_instructions() -> None:
@@ -415,7 +422,7 @@ async def test_complete_maps_each_response_text_item_to_a_part() -> None:
     result = await provider.complete([UserMessage.from_text("hi")], _settings())
 
     # THEN the returned message has one `TextPart` per response item, in order
-    assert result.parts == [TextPart(text="hello "), TextPart(text="world")]
+    assert result.message.parts == [TextPart(text="hello "), TextPart(text="world")]
 
 
 async def test_complete_returns_empty_parts_when_response_output_is_empty() -> None:
@@ -429,7 +436,100 @@ async def test_complete_returns_empty_parts_when_response_output_is_empty() -> N
     result = await provider.complete([UserMessage.from_text("hi")], _settings())
 
     # THEN the result has an empty parts list (not a single empty `TextPart`)
-    assert result.parts == []
+    assert result.message.parts == []
+
+
+# Call-metadata mapping tests
+# -----------------------------------------------------------------------------
+
+
+async def test_complete_maps_usage_ids_and_model_onto_provider_response() -> None:
+    """`complete` maps OpenAI usage, response id, and model onto the wrapper."""
+
+    # GIVEN a mock client returning a completed response with the call metadata
+    usage = ResponseUsage(
+        input_tokens=11,
+        output_tokens=7,
+        total_tokens=18,
+        input_tokens_details=InputTokensDetails(cached_tokens=4),
+        output_tokens_details=OutputTokensDetails(reasoning_tokens=3),
+    )
+    provider = _provider(_mock_client_returning(_response("hi", usage=usage)))
+
+    # WHEN `complete` is awaited
+    result = await provider.complete([UserMessage.from_text("hi")], _settings())
+
+    # THEN usage is normalized: OpenAI's input/output already include their
+    # cache/reasoning sub-slices, so the totals are used as-is and the nested
+    # details surface as sub-slices
+    assert result.usage is not None
+    assert result.usage.input_tokens == 11
+    assert result.usage.output_tokens == 7
+    assert result.usage.cache_read_tokens == 4
+    assert result.usage.reasoning_tokens == 3
+
+    # AND cache_write is 0: OpenAI has no separate cache-write counter
+    assert result.usage.cache_write_tokens == 0
+
+    # AND the derived total equals OpenAI's own reported total, confirming the
+    # convention (input/output already include their sub-slices)
+    assert result.usage.total_tokens == 18
+    assert result.usage.total_tokens == usage.total_tokens
+
+    # AND the response id, served model, and provider name are populated
+    assert result.response_id == "resp_test"
+    assert result.model == "gpt-test"
+    assert result.provider_name == "openai"
+
+
+async def test_complete_maps_absent_usage_to_none() -> None:
+    """`complete` yields `usage=None` when the response carries no usage."""
+
+    # GIVEN a mock client returning a response with no usage attached
+    provider = _provider(_mock_client_returning(_response("hi")))
+
+    # WHEN `complete` is awaited
+    result = await provider.complete([UserMessage.from_text("hi")], _settings())
+
+    # THEN the wrapper's usage is None (not a zero-filled Usage)
+    assert result.usage is None
+
+
+async def test_complete_warns_when_provider_total_diverges_from_derived(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A provider total that disagrees with input+output logs a warning."""
+
+    # GIVEN a mock client returning a response whose `total_tokens` contradicts
+    # input+output
+    response = _response(
+        "hi",
+        usage=ResponseUsage(
+            input_tokens=11,
+            output_tokens=7,
+            total_tokens=42,  # inconsistent with 11 + 7
+            input_tokens_details=InputTokensDetails(cached_tokens=0),
+            output_tokens_details=OutputTokensDetails(reasoning_tokens=0),
+        ),
+    )
+    provider = _provider(_mock_client_returning(response))
+
+    # WHEN `complete` is awaited
+    with caplog.at_level("WARNING", logger="avior.providers.openai_responses"):
+        result = await provider.complete([UserMessage.from_text("hi")], _settings())
+
+    # THEN exactly one WARNING is logged, naming both conflicting totals
+    assert len(caplog.records) == 1
+    warning = caplog.records[0]
+    assert warning.levelname == "WARNING"
+    assert "total_tokens=42" in warning.getMessage()
+    assert "derived total 18" in warning.getMessage()
+
+    # AND avior reports the derived total, with the provider's own kept in raw
+    assert result.usage is not None
+    assert result.usage.total_tokens == 18
+    assert result.raw_usage is not None
+    assert result.raw_usage["total_tokens"] == 42
 
 
 # Exception translation tests
@@ -539,7 +639,7 @@ async def test_complete_sets_stop_reason_stop_on_normal_completion() -> None:
     result = await provider.complete([UserMessage.from_text("hi")], _settings())
 
     # THEN the returned message carries `stop_reason="stop"`
-    assert result.stop_reason == "stop"
+    assert result.message.stop_reason == "stop"
 
 
 async def test_complete_maps_max_output_tokens_to_max_tokens_stop_reason() -> None:
@@ -554,7 +654,7 @@ async def test_complete_maps_max_output_tokens_to_max_tokens_stop_reason() -> No
     result = await provider.complete([UserMessage.from_text("hi")], _settings())
 
     # THEN the canonical `stop_reason` is `"max_tokens"`
-    assert result.stop_reason == "max_tokens"
+    assert result.message.stop_reason == "max_tokens"
 
 
 async def test_complete_maps_content_filter_to_content_filter_stop_reason() -> None:
@@ -567,7 +667,7 @@ async def test_complete_maps_content_filter_to_content_filter_stop_reason() -> N
     result = await provider.complete([UserMessage.from_text("hi")], _settings())
 
     # THEN the canonical `stop_reason` is `"content_filter"`
-    assert result.stop_reason == "content_filter"
+    assert result.message.stop_reason == "content_filter"
 
 
 async def test_complete_maps_refusal_content_part_to_refusal_stop_reason() -> None:
@@ -581,8 +681,8 @@ async def test_complete_maps_refusal_content_part_to_refusal_stop_reason() -> No
 
     # THEN the canonical `stop_reason` is `"refusal"` and the refusal text
     # is preserved in `parts`
-    assert result.stop_reason == "refusal"
-    assert result.text == "I can't help."
+    assert result.message.stop_reason == "refusal"
+    assert result.message.text == "I can't help."
 
 
 # Lifecycle tests

@@ -5,8 +5,9 @@ from collections.abc import Sequence
 import pytest
 
 from avior.core.messages import AssistantMessage, Message, TextPart, UserMessage
-from avior.core.provider import ModelSettings
+from avior.core.provider import ModelSettings, ProviderResponse
 from avior.core.testing import StubCall, StubProvider
+from avior.core.usage import Usage
 
 
 def _settings(model: str = "test-model") -> ModelSettings:
@@ -22,7 +23,7 @@ def _assistant_message(text: str) -> AssistantMessage:
 
 
 async def test_stub_provider_canonical_callable_returns_message_directly() -> None:
-    """An `AssistantMessage` returned by the callable is passed through."""
+    """An `AssistantMessage` from the callable is wrapped, identity kept."""
 
     # GIVEN a stub whose callable returns a pre-built `AssistantMessage`
     response = _assistant_message("hi there")
@@ -31,12 +32,12 @@ async def test_stub_provider_canonical_callable_returns_message_directly() -> No
     # WHEN `complete` is called
     result = await provider.complete([UserMessage.from_text("hello")], _settings())
 
-    # THEN the configured message is returned unchanged
-    assert result is response
+    # THEN the message is wrapped in a `ProviderResponse` by identity
+    assert result.message is response
 
 
 async def test_stub_provider_canonical_callable_wraps_string_responses() -> None:
-    """A `str` returned from the callable is wrapped as `AssistantMessage`."""
+    """A `str` from the callable is wrapped as a `ProviderResponse` message."""
 
     # GIVEN a stub whose callable returns a plain string
     provider = StubProvider(lambda _msgs, _settings: "hi")
@@ -44,8 +45,28 @@ async def test_stub_provider_canonical_callable_wraps_string_responses() -> None
     # WHEN `complete` is called
     result = await provider.complete([UserMessage.from_text("hello")], _settings())
 
-    # THEN the result is an `AssistantMessage` carrying that text
-    assert result.text == "hi"
+    # THEN the response message carries that text
+    assert result.message.text == "hi"
+
+
+async def test_stub_provider_passes_scripted_provider_response_through() -> None:
+    """A scripted `ProviderResponse` is returned unchanged, metadata intact."""
+
+    # GIVEN a stub scripted with a full `ProviderResponse` carrying metadata
+    response = ProviderResponse(
+        message=_assistant_message("hi"),
+        usage=Usage(input_tokens=11, output_tokens=3),
+        response_id="resp_42",
+        model="test-model",
+        provider_name="stub",
+    )
+    provider = StubProvider.from_responses([response])
+
+    # WHEN `complete` is called
+    result = await provider.complete([UserMessage.from_text("hello")], _settings())
+
+    # THEN the scripted `ProviderResponse` is returned as-is
+    assert result is response
 
 
 async def test_stub_provider_canonical_callable_awaits_coroutine_results() -> None:
@@ -60,8 +81,8 @@ async def test_stub_provider_canonical_callable_awaits_coroutine_results() -> No
     # WHEN `complete` is called
     result = await provider.complete([UserMessage.from_text("hello")], _settings())
 
-    # THEN the awaited string is wrapped as an `AssistantMessage`
-    assert result.text == "async hi"
+    # THEN the awaited string is wrapped as a `ProviderResponse` message
+    assert result.message.text == "async hi"
 
 
 async def test_stub_provider_callable_receives_messages_and_settings() -> None:
@@ -118,8 +139,8 @@ async def test_stub_provider_from_responses_returns_responses_in_order() -> None
     second = await provider.complete([UserMessage.from_text("b")], settings)
 
     # THEN each call returns the next response in order
-    assert first.text == "hello"
-    assert second.text == "world"
+    assert first.message.text == "hello"
+    assert second.message.text == "world"
 
 
 async def test_stub_provider_from_responses_accepts_mixed_str_and_message() -> None:
@@ -134,10 +155,10 @@ async def test_stub_provider_from_responses_accepts_mixed_str_and_message() -> N
     first = await provider.complete([UserMessage.from_text("a")], settings)
     second = await provider.complete([UserMessage.from_text("b")], settings)
 
-    # THEN strings are wrapped and `AssistantMessage` entries are returned
-    # unchanged
-    assert first.text == "from str"
-    assert second is canned_message
+    # THEN strings are wrapped and `AssistantMessage` entries keep their
+    # identity on the wrapping `ProviderResponse`
+    assert first.message.text == "from str"
+    assert second.message is canned_message
 
 
 async def test_stub_provider_from_responses_raises_when_exhausted() -> None:
@@ -187,8 +208,8 @@ async def test_stub_provider_from_predicates_returns_matching_response() -> None
     second = await provider.complete([UserMessage.from_text("hello")], settings)
 
     # THEN each call returns the paired response
-    assert first.text == "pong"
-    assert second.text == "hi there"
+    assert first.message.text == "pong"
+    assert second.message.text == "hi there"
 
 
 async def test_stub_provider_from_predicates_evaluates_in_order() -> None:
@@ -206,7 +227,7 @@ async def test_stub_provider_from_predicates_evaluates_in_order() -> None:
     result = await provider.complete([UserMessage.from_text("anything")], _settings())
 
     # THEN the response of the first predicate is returned
-    assert result.text == "first"
+    assert result.message.text == "first"
 
 
 async def test_stub_provider_from_predicates_raises_when_no_match() -> None:

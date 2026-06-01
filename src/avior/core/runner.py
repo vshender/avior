@@ -35,15 +35,16 @@ class Runner:
             UserMessage.from_text(input),
         ]
         response = await agent.provider.complete(messages, agent.model_settings)
+        message = response.message
 
-        match response.stop_reason:
+        match message.stop_reason:
             case "content_filter":
                 raise ContentFilterError(
                     "Response was blocked by the provider's content filter."
                 )
             case "max_tokens":
                 configured = agent.model_settings.max_tokens
-                message = (
+                detail = (
                     f"Model hit max_tokens budget ({configured}) before completing."
                     if configured is not None
                     else (
@@ -52,10 +53,10 @@ class Runner:
                         "to raise the limit."
                     )
                 )
-                raise MaxTokensExceededError(message)
+                raise MaxTokensExceededError(detail)
             case "refusal":
-                raise ModelRefusalError(response.text or "")
+                raise ModelRefusalError(message.text or "")
             case "stop":
                 pass
 
-        return response.text or ""
+        return message.text or ""
