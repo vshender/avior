@@ -14,9 +14,10 @@ from avior.core.messages import (
     TextPart,
     UserMessage,
 )
-from avior.core.provider import ModelSettings
+from avior.core.provider import ModelSettings, ProviderResponse
 from avior.core.runner import Runner
 from avior.core.testing import StubProvider
+from avior.core.usage import Usage
 
 
 async def test_runner_run_returns_assistant_text_for_hello_smoke() -> None:
@@ -32,8 +33,8 @@ async def test_runner_run_returns_assistant_text_for_hello_smoke() -> None:
     # WHEN the runner is invoked with a hello prompt
     result = await Runner.run(agent, "hello")
 
-    # THEN the returned string is the assistant's reply
-    assert result == "Hi!"
+    # THEN the result's output is the assistant's reply
+    assert result.output == "Hi!"
 
 
 async def test_runner_run_prepends_system_message_with_agent_instructions() -> None:
@@ -110,8 +111,8 @@ async def test_runner_run_returns_empty_string_when_response_has_no_text() -> No
     # WHEN the runner is invoked
     result = await Runner.run(agent, "hello")
 
-    # THEN the result is an empty string (not `None`)
-    assert result == ""
+    # THEN the output is an empty string (not `None`)
+    assert result.output == ""
 
 
 async def test_runner_run_raises_on_max_tokens_stop_reason() -> None:
@@ -211,5 +212,44 @@ async def test_runner_run_accepts_normal_stop_reason() -> None:
     # WHEN `Runner.run` is invoked
     result = await Runner.run(agent, "hello")
 
-    # THEN the assistant's text is returned
-    assert result == "Hi!"
+    # THEN the assistant's text is returned as the output
+    assert result.output == "Hi!"
+
+
+async def test_runner_run_carries_usage_from_provider_response() -> None:
+    """`Runner.run` surfaces the provider response's usage on the result."""
+
+    # GIVEN an agent whose provider reports token usage for its call
+    usage = Usage(input_tokens=11, output_tokens=7)
+    response = ProviderResponse(
+        message=AssistantMessage(parts=[TextPart(text="Hi!")], stop_reason="stop"),
+        usage=usage,
+    )
+    agent = Agent(
+        provider=StubProvider(lambda _msgs, _settings: response),
+        instructions="you are helpful",
+        model_settings=ModelSettings(model="test-model"),
+    )
+
+    # WHEN the runner is invoked
+    result = await Runner.run(agent, "hello")
+
+    # THEN the run result carries that usage
+    assert result.usage == usage
+
+
+async def test_runner_run_usage_is_none_when_provider_reports_none() -> None:
+    """`Runner.run` leaves `usage` as `None` when the provider reports none."""
+
+    # GIVEN an agent whose provider's response carries no usage
+    agent = Agent(
+        provider=StubProvider.from_responses(["Hi!"]),
+        instructions="you are helpful",
+        model_settings=ModelSettings(model="test-model"),
+    )
+
+    # WHEN the runner is invoked
+    result = await Runner.run(agent, "hello")
+
+    # THEN the result's usage is `None`
+    assert result.usage is None

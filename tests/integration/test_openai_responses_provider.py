@@ -40,11 +40,10 @@ async def test_runner_run_against_openai_returns_non_empty_text(
     )
 
     # WHEN we run a trivial prompt
-    reply = await Runner.run(agent, "Say hello.")
+    result = await Runner.run(agent, "Say hello.")
 
     # THEN we get a non-empty text response
-    assert isinstance(reply, str)
-    assert reply.strip() != ""
+    assert result.output.strip() != ""
 
 
 async def test_runner_run_raises_max_tokens_exceeded_against_openai(

@@ -19,6 +19,7 @@ from avior.core.messages import (
     UserMessage,
 )
 from avior.core.provider import ModelSettings, Provider, ProviderResponse
+from avior.core.result import RunResult
 from avior.core.runner import Runner
 from avior.core.usage import Usage
 
@@ -30,6 +31,7 @@ __all__ = [
     "Part",
     "Provider",
     "ProviderResponse",
+    "RunResult",
     "Runner",
     "StopReason",
     "SystemMessage",

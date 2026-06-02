@@ -7,22 +7,24 @@ from avior.core.exceptions import (
     ModelRefusalError,
 )
 from avior.core.messages import Message, SystemMessage, UserMessage
+from avior.core.result import RunResult
 
 
 class Runner:
     """Static-method orchestrator for `Agent` execution."""
 
     @staticmethod
-    async def run(agent: Agent, input: str) -> str:
-        """Run `agent` on `input` and return the assistant's text response.
+    async def run(agent: Agent, input: str) -> RunResult:
+        """Run `agent` on `input` and return the run result.
 
         Args:
             agent: The configured agent to drive.
             input: The user prompt sent to the model.
 
         Returns:
-            The concatenated text of the assistant's response, or an empty
-            string if the response has no text parts.
+            A `RunResult` carrying the assistant's final text (`output`, the
+            empty string if the response has no text parts) and the run's token
+            usage.
 
         Raises:
             ContentFilterError: An external content filter blocked the response.
@@ -59,4 +61,4 @@ class Runner:
             case "stop":
                 pass
 
-        return message.text or ""
+        return RunResult(output=message.text or "", usage=response.usage)

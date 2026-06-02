@@ -18,8 +18,8 @@ async def main() -> None:
         instructions="You are a concise assistant.  Reply in one sentence.",
         model_settings=ModelSettings(model="gpt-5-nano"),
     )
-    reply = await Runner.run(agent, "Say hello to avior.")
-    print(reply)
+    result = await Runner.run(agent, "Say hello to avior.")
+    print(result.output)
 
 
 if __name__ == "__main__":
