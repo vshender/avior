@@ -1,11 +1,12 @@
 """Result of an agent run.
 
-`RunResult` is what `Runner.run` returns: the run's final output together with
-the run-level metadata accumulated while producing it.
+`RunResult` is returned by `Runner.run`.  It is the public record of what the
+run produced and the information needed to inspect or continue it.
 """
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
+from avior.core.messages import Message
 from avior.core.usage import Usage
 
 
@@ -17,7 +18,30 @@ class RunResult(BaseModel):
     output: str
     """The assistant's final text response, or `""` if it produced no text."""
 
+    messages: list[Message]
+    """Conversation transcript for this run.
+
+    This list contains the input messages followed by the messages produced by
+    this run.  It does not include the `SystemMessage` created from
+    `agent.instructions`; `Runner.run` adds that system message again on each
+    call.
+    """
+
+    new_message_index: int = Field(ge=0)
+    """Index where this run's new messages start.
+
+    `messages[:new_message_index]` is the input passed to the run.
+    `messages[new_message_index:]` is what the run produced.  The index is
+    stored so this split survives serialization.
+    """
+
     usage: Usage | None = None
     """Normalized token usage for the whole run, or `None` if the provider
     reported none.
     """
+
+    @property
+    def new_messages(self) -> list[Message]:
+        """Messages produced by this run, excluding the input messages."""
+
+        return self.messages[self.new_message_index :]

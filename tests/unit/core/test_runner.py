@@ -10,6 +10,7 @@ from avior.core.exceptions import (
 )
 from avior.core.messages import (
     AssistantMessage,
+    Message,
     SystemMessage,
     TextPart,
     UserMessage,
@@ -253,3 +254,88 @@ async def test_runner_run_usage_is_none_when_provider_reports_none() -> None:
 
     # THEN the result's usage is `None`
     assert result.usage is None
+
+
+async def test_runner_run_result_messages_exclude_system_and_mark_new_turn() -> None:
+    """The result stores input plus reply, but not the system message."""
+
+    # GIVEN an agent whose provider replies "Hi!"
+    agent = Agent(
+        provider=StubProvider.from_responses(["Hi!"]),
+        instructions="you are helpful",
+        model_settings=ModelSettings(model="test-model"),
+    )
+
+    # WHEN the runner is invoked with a string prompt
+    result = await Runner.run(agent, "hello")
+
+    # THEN the transcript is the input user turn followed by the assistant
+    # reply, with no system turn
+    assert result.messages == [
+        UserMessage.from_text("hello"),
+        AssistantMessage(parts=[TextPart(text="Hi!")], stop_reason="stop"),
+    ]
+    # AND `new_messages` is just the run's output
+    assert result.new_messages == [
+        AssistantMessage(parts=[TextPart(text="Hi!")], stop_reason="stop"),
+    ]
+
+
+async def test_runner_run_accepts_message_list_input() -> None:
+    """`Runner.run` accepts existing conversation messages as input."""
+
+    # GIVEN an agent backed by a recording stub and a prior conversation
+    provider = StubProvider(lambda _msgs, _settings: "I'm well.")
+    agent = Agent(
+        provider=provider,
+        instructions="you are helpful",
+        model_settings=ModelSettings(model="test-model"),
+    )
+    history: list[Message] = [
+        UserMessage.from_text("hi"),
+        AssistantMessage(parts=[TextPart(text="Hello!")], stop_reason="stop"),
+        UserMessage.from_text("how are you?"),
+    ]
+
+    # WHEN the runner is invoked with that transcript as input
+    result = await Runner.run(agent, history)
+
+    # THEN the provider receives the system turn followed by the whole input
+    assert provider.calls[-1].messages == [
+        SystemMessage.from_text("you are helpful"),
+        *history,
+    ]
+
+    # AND the result extends the transcript with the new reply, marking it new
+    new_reply = AssistantMessage(parts=[TextPart(text="I'm well.")], stop_reason="stop")
+    assert result.messages == [*history, new_reply]
+    assert result.new_messages == [new_reply]
+
+
+async def test_runner_run_threads_result_messages_into_next_run() -> None:
+    """A result's `messages` can be passed back as the next run's input."""
+
+    # GIVEN an agent whose provider replies "A1" then "A2"
+    provider = StubProvider.from_responses(["A1", "A2"])
+    agent = Agent(
+        provider=provider,
+        instructions="you are helpful",
+        model_settings=ModelSettings(model="test-model"),
+    )
+
+    # WHEN a first run is continued by threading its messages plus a new turn
+    first = await Runner.run(agent, "Q1")
+    second = await Runner.run(agent, [*first.messages, UserMessage.from_text("Q2")])
+
+    # THEN the second call carries the full prior conversation after the system
+    # turn
+    assert provider.calls[-1].messages == [
+        SystemMessage.from_text("you are helpful"),
+        UserMessage.from_text("Q1"),
+        AssistantMessage(parts=[TextPart(text="A1")], stop_reason="stop"),
+        UserMessage.from_text("Q2"),
+    ]
+    # AND the second result's `new_messages` is only its own reply
+    assert second.new_messages == [
+        AssistantMessage(parts=[TextPart(text="A2")], stop_reason="stop"),
+    ]
