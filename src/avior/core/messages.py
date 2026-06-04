@@ -1,24 +1,29 @@
 """Conversation transcript primitives.
 
-The avior canonical message format uses a three-role shape (`system`, `user`,
-`assistant`) modeled after Anthropic.  Each role is its own class so that fields
-meaningful only on certain roles (such as `stop_reason` on assistant turns) live
-exactly where they apply, making invalid states unrepresentable.  Provider
-adapters are responsible for translating between this canonical form and the
-wire shape of the underlying API.
+A message is one turn in the conversation, tagged by its `kind` - the
+conversation role.  `system`, `user`, and `assistant` are the standard chat
+roles; `tool` carries tool-call results.  Each kind is its own class so that
+fields meaningful only on certain kinds (such as `stop_reason` on assistant
+turns) live exactly where they apply, making invalid states unrepresentable.
+
+Provider adapters translate between this canonical form and the wire shape of
+the underlying API.
 """
 
-from typing import Annotated, Literal, Self
+from typing import Annotated, Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field
 
-type StopReason = Literal["stop", "max_tokens", "content_filter", "refusal"]
+type StopReason = Literal["stop", "tool_use", "max_tokens", "content_filter", "refusal"]
 """Canonical reason a model stopped producing output.
 
 Normalized across providers so the orchestrator can apply a uniform policy
 without branching on vendor specifics:
 
-- `"stop"` - normal completion (end-of-turn, stop sequence, tool use).
+- `"stop"` - normal completion (end-of-turn, stop sequence).
+- `"tool_use"` - the model wants to call one or more tools; the requested calls
+  are present in `parts` as `ToolCallPart`s, which the orchestrator dispatches
+  before continuing the run.
 - `"max_tokens"` - hit the configured token budget; output likely truncated.
 - `"content_filter"` - the provider's server-side moderation filter blocked
   the response (a classifier layered between the model and the caller that
@@ -36,11 +41,84 @@ class TextPart(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     kind: Literal["text"] = "text"
+
     text: str
+    """The text content."""
 
 
-type Part = TextPart
-"""A typed content part of a message."""
+class ToolCallPart(BaseModel):
+    """A request from the LLM to call a tool, part of an assistant turn."""
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal["tool_call"] = "tool_call"
+
+    call_id: str
+    """The ID that correlates this call with its eventual `ToolResultPart`."""
+
+    tool_name: str
+    """The name of the tool the LLM wants to call."""
+
+    args: dict[str, Any]
+    """The raw arguments object the LLM produced."""
+
+
+class ToolResultOk(BaseModel):
+    """A successful tool call's result."""
+
+    model_config = ConfigDict(frozen=True)
+
+    status: Literal["ok"] = "ok"
+
+    content: str
+    """The tool call's result, rendered as text for the model."""
+
+
+class ToolResultError(BaseModel):
+    """A failed tool call - the tool was missing, its arguments were invalid, or
+    `execute` raised.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    status: Literal["error"] = "error"
+
+    content: str
+    """The error message, rendered as text for the model."""
+
+
+type ToolResult = Annotated[
+    ToolResultOk | ToolResultError,
+    Field(discriminator="status"),
+]
+"""The outcome of a single tool call: `ToolResultOk` or `ToolResultError`."""
+
+
+class ToolResultPart(BaseModel):
+    """A tool's result, returned to the LLM in a `ToolMessage`."""
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal["tool_result"] = "tool_result"
+
+    call_id: str
+    """The `ToolCallPart.call_id` this result answers."""
+
+    result: ToolResult
+    """The call's outcome."""
+
+
+type AssistantPart = Annotated[
+    TextPart | ToolCallPart,
+    Field(discriminator="kind"),
+]
+"""A content part of an assistant turn: text, or a request to call a tool."""
+
+type Part = Annotated[
+    TextPart | ToolCallPart | ToolResultPart,
+    Field(discriminator="kind"),
+]
+"""Any typed content part of a message.  Discriminated on `kind`."""
 
 
 class SystemMessage(BaseModel):
@@ -49,7 +127,9 @@ class SystemMessage(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     kind: Literal["system"] = "system"
+
     parts: list[TextPart]
+    """The instruction content, as text parts."""
 
     @classmethod
     def from_text(cls, text: str) -> Self:
@@ -70,7 +150,9 @@ class UserMessage(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     kind: Literal["user"] = "user"
+
     parts: list[TextPart]
+    """The caller's input, as text parts."""
 
     @classmethod
     def from_text(cls, text: str) -> Self:
@@ -86,28 +168,55 @@ class UserMessage(BaseModel):
 
 
 class AssistantMessage(BaseModel):
-    """An `assistant`-role turn produced by a model.
-
-    Carries `stop_reason` describing why the model stopped (see `StopReason`).
-    `Provider` adapters always set `stop_reason` when constructing an assistant
-    message from a provider response.
-    """
+    """An `assistant`-role turn produced by a model."""
 
     model_config = ConfigDict(frozen=True)
 
     kind: Literal["assistant"] = "assistant"
-    parts: list[TextPart]
+
+    parts: list[AssistantPart]
+    """The assistant's content: text and tool-call parts."""
+
     stop_reason: StopReason
+    """Why the model stopped (see `StopReason`); always set by `Provider`
+    adapters when building the message from a provider response.
+    """
 
     @property
     def text(self) -> str | None:
-        """Concatenated text of all parts, or `None` if there are no parts."""
+        """Concatenated text of the message's `TextPart`s, or `None` if none.
 
-        return "".join(p.text for p in self.parts) if self.parts else None
+        Tool-call parts are ignored, so this is the assistant's natural-language
+        text alongside any tool requests.
+        """
+
+        texts = [p.text for p in self.parts if isinstance(p, TextPart)]
+        return "".join(texts) if texts else None
+
+
+class ToolMessage(BaseModel):
+    """A turn carrying tool-call results back to the model."""
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal["tool"] = "tool"
+
+    parts: list[ToolResultPart]
+    """The tool-call results carried by this turn."""
+
+    @property
+    def text(self) -> str | None:
+        """Always `None`: a tool turn carries structured results, not text.
+
+        Present so every `Message` exposes `text` uniformly; read `parts` for
+        the results.
+        """
+
+        return None
 
 
 type Message = Annotated[
-    SystemMessage | UserMessage | AssistantMessage,
+    SystemMessage | UserMessage | AssistantMessage | ToolMessage,
     Field(discriminator="kind"),
 ]
 """A single turn in the conversation transcript.  Discriminated on `kind`."""

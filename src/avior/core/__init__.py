@@ -16,11 +16,18 @@ from avior.core.messages import (
     StopReason,
     SystemMessage,
     TextPart,
+    ToolCallPart,
+    ToolMessage,
+    ToolResult,
+    ToolResultError,
+    ToolResultOk,
+    ToolResultPart,
     UserMessage,
 )
 from avior.core.provider import ModelSettings, Provider, ProviderResponse
 from avior.core.result import RunResult
 from avior.core.runner import Runner
+from avior.core.tools import Tool
 from avior.core.usage import Usage
 
 __all__ = [
@@ -36,6 +43,13 @@ __all__ = [
     "StopReason",
     "SystemMessage",
     "TextPart",
+    "Tool",
+    "ToolCallPart",
+    "ToolMessage",
+    "ToolResult",
+    "ToolResultError",
+    "ToolResultOk",
+    "ToolResultPart",
     "Usage",
     "UserMessage",
 ]

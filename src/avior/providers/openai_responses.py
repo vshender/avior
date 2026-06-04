@@ -12,7 +12,7 @@ Install via the optional extra: `pip install avior[openai]`.
 
 import logging
 from collections.abc import Sequence
-from typing import Literal, assert_never
+from typing import Any, Literal, assert_never
 
 try:
     import openai
@@ -41,13 +41,16 @@ from avior.core.exceptions import (
 )
 from avior.core.messages import (
     AssistantMessage,
+    AssistantPart,
     Message,
     StopReason,
     SystemMessage,
     TextPart,
+    ToolMessage,
     UserMessage,
 )
 from avior.core.provider import ModelSettings, Provider, ProviderResponse
+from avior.core.tools import Tool
 from avior.core.usage import Usage
 
 logger = logging.getLogger(__name__)
@@ -100,6 +103,7 @@ class OpenAIResponsesProvider(Provider):
         self,
         messages: Sequence[Message],
         settings: ModelSettings,
+        tools: Sequence[Tool[Any, Any]] = (),
     ) -> ProviderResponse:
         """Send `messages` to OpenAI Responses API and return the assistant's
         response.
@@ -118,12 +122,17 @@ class OpenAIResponsesProvider(Provider):
                 joined string; non-system messages keep their order in
                 `input`), but the interleaving between the two groups is lost.
             settings: Per-call invocation settings.
+            tools: Not yet supported by this adapter; passing a non-empty
+                sequence raises `NotImplementedError`.  Tool calling for the
+                Responses API lands in a later change.
 
         Returns:
             A `ProviderResponse` wrapping the assistant message together with
             the call metadata.
 
         Raises:
+            NotImplementedError: `tools` is non-empty (tool calling not yet
+                implemented for this adapter).
             ProviderHTTPError: The provider returned a 4xx or 5xx HTTP response.
                 `status_code` carries the wire status.
             ProviderResponseValidationError: The provider returned a successful
@@ -134,6 +143,12 @@ class OpenAIResponsesProvider(Provider):
             ProviderError: Any other unexpected failure from the OpenAI SDK,
                 preserved as `__cause__`.
         """
+
+        if tools:
+            raise NotImplementedError(
+                "OpenAIResponsesProvider does not support tools yet; "
+                "tool calling for the Responses API lands in a later change."
+            )
 
         logger.debug("complete: model=%s, messages=%d", settings.model, len(messages))
 
@@ -168,8 +183,8 @@ class OpenAIResponsesProvider(Provider):
         except openai.OpenAIError as e:
             raise ProviderError(str(e)) from e
 
-        text_parts: list[TextPart] = []
-        refusal_parts: list[TextPart] = []
+        text_parts: list[AssistantPart] = []
+        refusal_parts: list[AssistantPart] = []
         for item in response.output:
             if isinstance(item, ResponseOutputMessage):
                 for content in item.content:
@@ -315,6 +330,11 @@ class OpenAIResponsesProvider(Provider):
                         texts.append(msg.text)
                 case UserMessage() | AssistantMessage():
                     rest.append(msg)
+                case ToolMessage():
+                    raise NotImplementedError(
+                        "OpenAIResponsesProvider does not support tool messages "
+                        "yet; tool calling for the Responses API lands later."
+                    )
                 case _:
                     assert_never(msg)
 

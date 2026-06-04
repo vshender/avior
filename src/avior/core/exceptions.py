@@ -1,11 +1,14 @@
 """Exception types raised by `avior.core` and its subpackages.
 
-Two independent trees sit under a common `AviorError` root:
+Three categories sit under a common `AviorError` root:
 
 - `ProviderError` and subclasses cover transport / SDK failures - the provider
   could not fulfill its contract (HTTP error, network failure, schema mismatch).
 - `AgentRunError` and subclasses cover failures during an agent run other
   than transport-level provider failures.
+- `ConfigurationError` covers invalid configuration detected when avior objects
+  are constructed - a programmer error to fix in code, not a runtime condition
+  to catch and handle.
 """
 
 
@@ -65,6 +68,16 @@ class AgentRunError(AviorError):
     """Base class for failures during an agent run."""
 
 
+class MaxIterationsExceeded(AgentRunError):
+    """The agent loop ran more iterations than `max_iter` without finishing.
+
+    One iteration is a single LLM call plus the tool calls its response
+    requested.  Hitting the cap usually means the LLM kept calling tools without
+    converging on a final answer - a loop, or a `max_iter` set too low.  Raise
+    the limit or inspect the tool behavior.
+    """
+
+
 class MaxTokensExceededError(AgentRunError):
     """The model hit the configured token budget before completing its reply.
 
@@ -116,3 +129,14 @@ class ModelRefusalError(AgentRunError):
 
         super().__init__(refusal_text)
         self.refusal_text = refusal_text
+
+
+class ConfigurationError(AviorError):
+    """Invalid configuration detected when an avior object is constructed.
+
+    Covers programmer errors caught at construction time - for example, an
+    `Agent` given two tools that share a name.  Unlike `ProviderError` and
+    `AgentRunError`, which are runtime conditions a caller may catch and handle,
+    a configuration error signals a bug in how avior is set up: fix it in code
+    rather than handling it at runtime.
+    """

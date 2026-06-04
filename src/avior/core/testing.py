@@ -11,10 +11,11 @@ implement the underlying LLM contract - it merely replays scripted output.
 
 from collections.abc import Awaitable, Callable, Sequence
 from inspect import isawaitable
-from typing import NamedTuple, Self
+from typing import Any, NamedTuple, Self
 
 from avior.core.messages import AssistantMessage, Message, TextPart
 from avior.core.provider import ModelSettings, Provider, ProviderResponse
+from avior.core.tools import Tool
 
 type StubResponse = str | AssistantMessage | ProviderResponse
 """A scripted response, in one of three forms:
@@ -45,12 +46,12 @@ class StubCall(NamedTuple):
     """A single recorded invocation of a `StubProvider`.
 
     Stored in the order calls were made. Use field access (`.messages`,
-    `.settings`) for clarity; tuple unpacking (`msgs, settings = call`)
-    also works.
+    `.settings`, `.tools`) for clarity; tuple unpacking
+    (`msgs, settings, tools = call`) also works.
 
-    `messages` and `settings` are stored by reference, not by snapshot.
-    If the calling code mutates the same list or settings object after
-    the call returns, the recorded history reflects those mutations.
+    `messages`, `settings`, and `tools` are stored by reference, not by
+    snapshot.  If the calling code mutates the same list or settings object
+    after the call returns, the recorded history reflects those mutations.
     For predictable assertions, treat the recorded values as read-only
     after `complete()` returns, or construct a fresh list / settings per
     call.
@@ -58,6 +59,7 @@ class StubCall(NamedTuple):
 
     messages: Sequence[Message]
     settings: ModelSettings
+    tools: Sequence[Tool[Any, Any]] = ()
 
 
 def _normalize_response(response: StubResponse) -> ProviderResponse:
@@ -224,18 +226,22 @@ class StubProvider(Provider):
         self,
         messages: Sequence[Message],
         settings: ModelSettings,
+        tools: Sequence[Tool[Any, Any]] = (),
     ) -> ProviderResponse:
         """Record the call, dispatch, and return the scripted response.
 
         Args:
             messages: Conversation transcript passed to the stub.
             settings: Per-call model invocation settings.
+            tools: Recorded on the `StubCall` for assertions, but does not
+                affect the response - the stub replays scripted output
+                regardless (script a `ToolCallPart` to exercise tool dispatch).
 
         Returns:
             The scripted response, normalized to a `ProviderResponse`.
         """
 
-        self.calls.append(StubCall(messages=messages, settings=settings))
+        self.calls.append(StubCall(messages=messages, settings=settings, tools=tools))
 
         result = self._func(messages, settings)
         if isawaitable(result):

@@ -8,22 +8,23 @@ from typing import Any, Self
 from pydantic import BaseModel, ConfigDict
 
 from avior.core.messages import AssistantMessage, Message
+from avior.core.tools import Tool
 from avior.core.usage import Usage
 
 
 class ModelSettings(BaseModel):
-    """Per-call model invocation settings.
-
-    `model` is the only required field.  `temperature` and `max_tokens` are
-    optional with `None` meaning "use the provider's default for this model";
-    each adapter applies its own fallback if it requires a value.
-    """
+    """Per-call model invocation settings."""
 
     model_config = ConfigDict(frozen=True)
 
     model: str
+    """The model to use (a provider-specific identifier)."""
+
     temperature: float | None = None
+    """Sampling temperature; `None` uses the provider's default."""
+
     max_tokens: int | None = None
+    """Maximum output tokens; `None` uses the provider's default."""
 
 
 class ProviderResponse(BaseModel):
@@ -98,12 +99,17 @@ class Provider(ABC):
         self,
         messages: Sequence[Message],
         settings: ModelSettings,
+        tools: Sequence[Tool[Any, Any]] = (),
     ) -> ProviderResponse:
         """Send `messages` to the model and return its response.
 
         Args:
             messages: Conversation transcript to send to the model.
             settings: Per-call invocation settings.
+            tools: Tools to offer the model.  The adapter sends each tool's
+                name, description, and arguments JSON schema, and parses any
+                tool calls in the response into `ToolCallPart`s on the assistant
+                message.
 
         Returns:
             A `ProviderResponse` carrying the assistant message and the

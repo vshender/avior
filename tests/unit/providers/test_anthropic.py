@@ -15,7 +15,8 @@ from anthropic import (
     omit,
 )
 from anthropic.types import Message as AnthropicMessage
-from anthropic.types import TextBlock, Usage
+from anthropic.types import TextBlock, ToolUseBlock, Usage
+from pydantic import BaseModel
 
 from avior.core.exceptions import (
     ProviderConnectionError,
@@ -28,9 +29,15 @@ from avior.core.messages import (
     Message,
     SystemMessage,
     TextPart,
+    ToolCallPart,
+    ToolMessage,
+    ToolResultError,
+    ToolResultOk,
+    ToolResultPart,
     UserMessage,
 )
 from avior.core.provider import ModelSettings
+from avior.core.tools import Tool
 from avior.providers.anthropic import AnthropicProvider
 
 
@@ -75,6 +82,40 @@ def _response_with_stop_reason(
         model="claude-test",
         content=[TextBlock(type="text", text="...")],
         stop_reason=stop_reason,
+        stop_sequence=None,
+        usage=Usage(input_tokens=0, output_tokens=0),
+    )
+
+
+class _CityArgs(BaseModel):
+    city: str
+
+
+class _Weather(Tool[_CityArgs, str]):
+    """A trivial tool used to exercise tool-calling wire translation."""
+
+    name = "get_weather"
+    description = "Look up the weather for a city."
+    args_model = _CityArgs
+
+    async def execute(self, args: _CityArgs) -> str:
+        return "sunny"
+
+
+def _tool_use_response(
+    call_id: str,
+    tool_name: str,
+    args: dict[str, object],
+) -> AnthropicMessage:
+    """Build an assistant response carrying a single `tool_use` block."""
+
+    return AnthropicMessage(
+        id="msg_test",
+        type="message",
+        role="assistant",
+        model="claude-test",
+        content=[ToolUseBlock(type="tool_use", id=call_id, name=tool_name, input=args)],
+        stop_reason="tool_use",
         stop_sequence=None,
         usage=Usage(input_tokens=0, output_tokens=0),
     )
@@ -524,6 +565,171 @@ async def test_complete_maps_refusal_to_refusal_stop_reason() -> None:
 
     # THEN the canonical `stop_reason` is `"refusal"`
     assert result.message.stop_reason == "refusal"
+
+
+# Tool-calling tests
+# -----------------------------------------------------------------------------
+
+
+async def test_complete_parses_tool_use_block_into_tool_call_part() -> None:
+    """A response `tool_use` block decodes into a `ToolCallPart`."""
+
+    # GIVEN a provider whose mock client returns a tool-use response
+    response = _tool_use_response("call_1", "get_weather", {"city": "Paris"})
+    provider = _provider(_mock_client_returning(response))
+
+    # WHEN `complete` is awaited
+    result = await provider.complete([UserMessage.from_text("weather?")], _settings())
+
+    # THEN the block decodes into a `ToolCallPart` with its id, name, and args
+    assert result.message.parts == [
+        ToolCallPart(call_id="call_1", tool_name="get_weather", args={"city": "Paris"})
+    ]
+
+
+async def test_complete_maps_tool_use_to_tool_use_stop_reason() -> None:
+    """Anthropic `stop_reason="tool_use"` maps to canonical `"tool_use"`."""
+
+    # GIVEN a provider whose mock client returns a tool-use response
+    response = _tool_use_response("call_1", "get_weather", {"city": "Paris"})
+    provider = _provider(_mock_client_returning(response))
+
+    # WHEN `complete` is awaited
+    result = await provider.complete([UserMessage.from_text("weather?")], _settings())
+
+    # THEN the canonical `stop_reason` is `"tool_use"`
+    assert result.message.stop_reason == "tool_use"
+
+
+async def test_complete_sends_tools_with_name_description_and_input_schema() -> None:
+    """Each offered tool is sent with its name, description, and JSON schema."""
+
+    # GIVEN a provider and an offered tool
+    mock_client = _mock_client_returning(_response("ok"))
+    provider = _provider(mock_client)
+
+    # WHEN `complete` is invoked with that tool
+    await provider.complete([UserMessage.from_text("hi")], _settings(), [_Weather()])
+
+    # THEN the Anthropic SDK call carries the tool's name, description, and args
+    # schema
+    tools_param = mock_client.messages.create.call_args.kwargs["tools"]
+    assert tools_param == [
+        {
+            "name": "get_weather",
+            "description": "Look up the weather for a city.",
+            "input_schema": _CityArgs.model_json_schema(),
+        }
+    ]
+
+
+async def test_complete_omits_tools_when_none_offered() -> None:
+    """No offered tools means the `tools` kwarg is the `omit` sentinel."""
+
+    # GIVEN a provider and no tools
+    mock_client = _mock_client_returning(_response("ok"))
+    provider = _provider(mock_client)
+
+    # WHEN `complete` is invoked without tools
+    await provider.complete([UserMessage.from_text("hi")], _settings())
+
+    # THEN the `tools` kwarg is omitted rather than sent as an empty list
+    assert mock_client.messages.create.call_args.kwargs["tools"] is omit
+
+
+async def test_complete_sends_assistant_tool_call_as_tool_use_block() -> None:
+    """An assistant `ToolCallPart` in the input becomes a `tool_use` block."""
+
+    # GIVEN a continuation transcript: the assistant requested a tool call and
+    # its result was supplied (a re-entry into `complete`)
+    mock_client = _mock_client_returning(_response("ok"))
+    provider = _provider(mock_client)
+    history: list[Message] = [
+        UserMessage.from_text("weather?"),
+        AssistantMessage(
+            parts=[
+                ToolCallPart(
+                    call_id="call_1", tool_name="get_weather", args={"city": "Paris"}
+                )
+            ],
+            stop_reason="tool_use",
+        ),
+        ToolMessage(
+            parts=[
+                ToolResultPart(call_id="call_1", result=ToolResultOk(content="sunny"))
+            ]
+        ),
+    ]
+
+    # WHEN `complete` is invoked
+    await provider.complete(history, _settings())
+
+    # THEN the assistant turn is sent with a matching `tool_use` block
+    wire_messages = mock_client.messages.create.call_args.kwargs["messages"]
+    assistant_wire = next(m for m in wire_messages if m["role"] == "assistant")
+    assert assistant_wire == {
+        "role": "assistant",
+        "content": [
+            {
+                "type": "tool_use",
+                "id": "call_1",
+                "name": "get_weather",
+                "input": {"city": "Paris"},
+            }
+        ],
+    }
+
+
+async def test_complete_sends_tool_message_as_user_tool_result_blocks() -> None:
+    """A `ToolMessage` becomes a user turn of `tool_result` blocks."""
+
+    # GIVEN a continuation transcript whose assistant requested two tool calls,
+    # now answered with one ok and one error result
+    mock_client = _mock_client_returning(_response("ok"))
+    provider = _provider(mock_client)
+    history: list[Message] = [
+        UserMessage.from_text("weather?"),
+        AssistantMessage(
+            parts=[
+                ToolCallPart(
+                    call_id="ok_1", tool_name="get_weather", args={"city": "Paris"}
+                ),
+                ToolCallPart(
+                    call_id="err_1", tool_name="get_weather", args={"city": "?"}
+                ),
+            ],
+            stop_reason="tool_use",
+        ),
+        ToolMessage(
+            parts=[
+                ToolResultPart(call_id="ok_1", result=ToolResultOk(content="sunny")),
+                ToolResultPart(call_id="err_1", result=ToolResultError(content="boom")),
+            ]
+        ),
+    ]
+
+    # WHEN `complete` is invoked
+    await provider.complete(history, _settings())
+
+    # THEN the results are sent as a user turn, with `is_error` set per status
+    wire_messages = mock_client.messages.create.call_args.kwargs["messages"]
+    assert wire_messages[-1] == {
+        "role": "user",
+        "content": [
+            {
+                "type": "tool_result",
+                "tool_use_id": "ok_1",
+                "content": "sunny",
+                "is_error": False,
+            },
+            {
+                "type": "tool_result",
+                "tool_use_id": "err_1",
+                "content": "boom",
+                "is_error": True,
+            },
+        ],
+    }
 
 
 # Lifecycle tests

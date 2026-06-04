@@ -3,10 +3,12 @@
 from collections.abc import Sequence
 
 import pytest
+from pydantic import BaseModel
 
 from avior.core.messages import AssistantMessage, Message, TextPart, UserMessage
 from avior.core.provider import ModelSettings, ProviderResponse
 from avior.core.testing import StubCall, StubProvider
+from avior.core.tools import Tool
 from avior.core.usage import Usage
 
 
@@ -125,6 +127,31 @@ async def test_stub_provider_records_each_call_in_order() -> None:
     assert provider.calls[0].messages[-1].text == "first"
     assert provider.calls[1].messages[-1].text == "second"
     assert provider.calls[2].messages[-1].text == "third"
+
+
+async def test_stub_provider_records_offered_tools() -> None:
+    """`complete` records the tools it was offered on the `StubCall`."""
+
+    class _NoArgs(BaseModel):
+        pass
+
+    class _Ping(Tool[_NoArgs, str]):
+        name = "ping"
+        description = "Ping."
+        args_model = _NoArgs
+
+        async def execute(self, args: _NoArgs) -> str:
+            return "pong"
+
+    # GIVEN a stub and a tool to offer
+    tool = _Ping()
+    provider = StubProvider(lambda _msgs, _settings: "ok")
+
+    # WHEN `complete` is called with that tool offered
+    await provider.complete([UserMessage.from_text("hi")], _settings(), [tool])
+
+    # THEN the offered tools are recorded on the call
+    assert provider.calls[-1].tools == [tool]
 
 
 async def test_stub_provider_from_responses_returns_responses_in_order() -> None:

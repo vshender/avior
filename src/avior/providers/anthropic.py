@@ -8,13 +8,21 @@ Install via the optional extra: `pip install avior[anthropic]`.
 
 import logging
 from collections.abc import Sequence
-from typing import Literal, assert_never
+from typing import Any, assert_never, cast
 
 try:
     import anthropic
     from anthropic import AsyncAnthropic, Omit, omit
     from anthropic.types import Message as AnthropicMessage
-    from anthropic.types import MessageParam, TextBlock, TextBlockParam
+    from anthropic.types import (
+        MessageParam,
+        TextBlock,
+        TextBlockParam,
+        ToolParam,
+        ToolResultBlockParam,
+        ToolUseBlock,
+        ToolUseBlockParam,
+    )
     from anthropic.types import Usage as AnthropicUsage
 except ImportError as e:
     raise ImportError(
@@ -30,27 +38,23 @@ from avior.core.exceptions import (
 )
 from avior.core.messages import (
     AssistantMessage,
+    AssistantPart,
     Message,
     StopReason,
     SystemMessage,
     TextPart,
+    ToolCallPart,
+    ToolMessage,
     UserMessage,
 )
 from avior.core.provider import ModelSettings, Provider, ProviderResponse
+from avior.core.tools import Tool
 from avior.core.usage import Usage
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_MAX_TOKENS = 4096
 """Fallback `max_tokens` when `ModelSettings.max_tokens` is `None`."""
-
-type _AnthropicRole = Literal["user", "assistant"]
-"""Anthropic's per-message role union.
-
-Anthropic's Messages API places system instructions in a top-level `system`
-parameter, so the per-message `role` is narrower than avior's canonical
-`Message` (which also admits `SystemMessage`).
-"""
 
 
 class AnthropicProvider(Provider):
@@ -92,6 +96,7 @@ class AnthropicProvider(Provider):
         self,
         messages: Sequence[Message],
         settings: ModelSettings,
+        tools: Sequence[Tool[Any, Any]] = (),
     ) -> ProviderResponse:
         """Send `messages` to Claude and return the assistant's response.
 
@@ -107,6 +112,9 @@ class AnthropicProvider(Provider):
                 two groups is lost (Anthropic's wire format does not support
                 per-position system instructions).
             settings: Per-call invocation settings.
+            tools: Tools to offer the model.  Each is sent as an Anthropic tool
+                with its arguments JSON schema as `input_schema`; `tool_use`
+                blocks in the response are parsed back into `ToolCallPart`s.
 
         Returns:
             A `ProviderResponse` wrapping the assistant message together with
@@ -140,6 +148,9 @@ class AnthropicProvider(Provider):
             if settings.max_tokens is not None
             else _DEFAULT_MAX_TOKENS
         )
+        tools_param: list[ToolParam] | Omit = (
+            [self._to_tool_param(t) for t in tools] if tools else omit
+        )
 
         try:
             response = await self._client.messages.create(
@@ -148,6 +159,7 @@ class AnthropicProvider(Provider):
                 model=settings.model,
                 max_tokens=max_tokens,
                 temperature=temperature_param,
+                tools=tools_param,
             )
         except anthropic.APIStatusError as e:
             raise ProviderHTTPError(str(e), status_code=e.status_code) from e
@@ -158,12 +170,21 @@ class AnthropicProvider(Provider):
         except anthropic.AnthropicError as e:
             raise ProviderError(str(e)) from e
 
-        parts: list[TextPart] = [
-            TextPart(text=block.text)
-            for block in response.content
-            if isinstance(block, TextBlock)
-        ]
+        parts: list[AssistantPart] = []
+        for block in response.content:
+            if isinstance(block, TextBlock):
+                parts.append(TextPart(text=block.text))
+            elif isinstance(block, ToolUseBlock):
+                parts.append(
+                    ToolCallPart(
+                        call_id=block.id,
+                        tool_name=block.name,
+                        args=cast(dict[str, Any], block.input),
+                    )
+                )
+
         stop_reason = self._map_stop_reason(response)
+
         return ProviderResponse(
             message=AssistantMessage(parts=parts, stop_reason=stop_reason),
             usage=self._map_usage(response.usage),
@@ -203,15 +224,16 @@ class AnthropicProvider(Provider):
     def _map_stop_reason(response: AnthropicMessage) -> StopReason:
         """Map Anthropic's `stop_reason` to canonical `StopReason`.
 
+        - `"tool_use"` -> `"tool_use"` (the model requested tool calls).
         - `"max_tokens"` -> `"max_tokens"` (output truncated at the cap).
-        - `"refusal"` -> `"refusal"` (the model itself declined; the
-          refusal text is present in `content` and lands in `parts`).
-        - Anything else (`"end_turn"`, `"stop_sequence"`, `"tool_use"`,
-          `"pause_turn"`, `None`) -> `"stop"`; the orchestrator treats the
-          response as normal completion and decides next steps from `parts`.
+        - `"refusal"` -> `"refusal"` (the model itself declined).
+        - Anything else (`"end_turn"`, `"stop_sequence"`, `"pause_turn"`,
+          `None`) -> `"stop"` (normal completion).
         """
 
         match response.stop_reason:
+            case "tool_use":
+                return "tool_use"
             case "max_tokens":
                 return "max_tokens"
             case "refusal":
@@ -232,9 +254,22 @@ class AnthropicProvider(Provider):
             await self._client.close()
 
     @staticmethod
+    def _to_tool_param(tool: Tool[Any, Any]) -> ToolParam:
+        """Convert an avior `Tool` to an Anthropic tool definition."""
+
+        return ToolParam(
+            name=tool.name,
+            description=tool.description,
+            input_schema=tool.args_model.model_json_schema(),
+        )
+
+    @staticmethod
     def _extract_system(
         messages: Sequence[Message],
-    ) -> tuple[list[TextBlockParam] | None, list[UserMessage | AssistantMessage]]:
+    ) -> tuple[
+        list[TextBlockParam] | None,
+        list[UserMessage | AssistantMessage | ToolMessage],
+    ]:
         """Pull all `SystemMessage`s out of the conversation.
 
         Anthropic's Messages API does not accept system messages in the
@@ -247,13 +282,13 @@ class AnthropicProvider(Provider):
         """
 
         system_blocks: list[TextBlockParam] = []
-        rest: list[UserMessage | AssistantMessage] = []
+        rest: list[UserMessage | AssistantMessage | ToolMessage] = []
         for msg in messages:
             match msg:
                 case SystemMessage():
                     if msg.text:
                         system_blocks.append(TextBlockParam(type="text", text=msg.text))
-                case UserMessage() | AssistantMessage():
+                case UserMessage() | AssistantMessage() | ToolMessage():
                     rest.append(msg)
                 case _:
                     assert_never(msg)
@@ -261,22 +296,61 @@ class AnthropicProvider(Provider):
         return (system_blocks or None), rest
 
     @staticmethod
-    def _to_wire(message: UserMessage | AssistantMessage) -> MessageParam:
+    def _to_wire(message: UserMessage | AssistantMessage | ToolMessage) -> MessageParam:
         """Convert an avior non-system `Message` to an Anthropic `MessageParam`.
 
         `SystemMessage`s are not accepted - they are extracted into the
         top-level `system` parameter by `_extract_system` upstream.
+
+        Maps each message type to Anthropic's wire shape:
+
+        - `UserMessage` -> a `user` turn of text blocks.
+        - `AssistantMessage` -> an `assistant` turn; text parts become text
+          blocks and tool calls become `tool_use` blocks.
+        - `ToolMessage` -> a `user` turn of `tool_result` blocks (Anthropic
+          carries tool results in the user role).
         """
 
         match message:
             case UserMessage():
-                role: _AnthropicRole = "user"
+                user_content: list[TextBlockParam] = [
+                    TextBlockParam(type="text", text=p.text) for p in message.parts
+                ]
+                return MessageParam(role="user", content=user_content)
+
             case AssistantMessage():
-                role = "assistant"
+                asst_content: list[TextBlockParam | ToolUseBlockParam] = []
+                for part in message.parts:
+                    match part:
+                        case TextPart():
+                            asst_content.append(
+                                TextBlockParam(type="text", text=part.text)
+                            )
+                        case ToolCallPart():
+                            asst_content.append(
+                                ToolUseBlockParam(
+                                    type="tool_use",
+                                    id=part.call_id,
+                                    name=part.tool_name,
+                                    input=part.args,
+                                )
+                            )
+                        case _:
+                            assert_never(part)
+
+                return MessageParam(role="assistant", content=asst_content)
+
+            case ToolMessage():
+                tool_content: list[ToolResultBlockParam] = [
+                    ToolResultBlockParam(
+                        type="tool_result",
+                        tool_use_id=p.call_id,
+                        content=p.result.content,
+                        is_error=p.result.status == "error",
+                    )
+                    for p in message.parts
+                ]
+                return MessageParam(role="user", content=tool_content)
+
             case _:
                 assert_never(message)
-
-        content: list[TextBlockParam] = [
-            TextBlockParam(type="text", text=p.text) for p in message.parts
-        ]
-        return MessageParam(role=role, content=content)
