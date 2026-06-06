@@ -16,6 +16,7 @@ from openai import (
 )
 from openai.types.responses import (
     Response,
+    ResponseFunctionToolCall,
     ResponseOutputItem,
     ResponseOutputMessage,
     ResponseOutputRefusal,
@@ -27,6 +28,7 @@ from openai.types.responses.response_usage import (
     InputTokensDetails,
     OutputTokensDetails,
 )
+from pydantic import BaseModel
 
 from avior.core.exceptions import (
     ProviderConnectionError,
@@ -39,9 +41,15 @@ from avior.core.messages import (
     Message,
     SystemMessage,
     TextPart,
+    ToolCallPart,
+    ToolMessage,
+    ToolResultError,
+    ToolResultOk,
+    ToolResultPart,
     UserMessage,
 )
 from avior.core.provider import ModelSettings
+from avior.core.tools import Tool
 from avior.providers.openai_responses import OpenAIResponsesProvider
 
 
@@ -94,16 +102,22 @@ def _response(*texts: str, usage: ResponseUsage | None = None) -> Response:
 
 
 def _incomplete_response(
-    reason: Literal["max_output_tokens", "content_filter"],
+    reason: Literal["max_output_tokens", "content_filter"] | None,
+    output: list[ResponseOutputItem] | None = None,
 ) -> Response:
-    """Build a `Response` with `status="incomplete"` and the given reason."""
+    """Build a `Response` with `status="incomplete"` and the given reason.
+
+    `reason=None` models an incomplete response whose reason the SDK left
+    unset.  `output` defaults to empty; pass items (e.g. a truncated
+    `function_call`) to model output the model had started before stopping.
+    """
 
     return Response(
         id="resp_test",
         object="response",
         created_at=0.0,
         model="gpt-test",
-        output=[],
+        output=output or [],
         parallel_tool_calls=False,
         tool_choice="auto",
         tools=[],
@@ -127,6 +141,51 @@ def _refusal_response(refusal_text: str) -> Response:
                 role="assistant",
                 status="completed",
                 content=[ResponseOutputRefusal(type="refusal", refusal=refusal_text)],
+            )
+        ],
+        parallel_tool_calls=False,
+        tool_choice="auto",
+        tools=[],
+        status="completed",
+    )
+
+
+class _CityArgs(BaseModel):
+    city: str
+
+
+class _Weather(Tool[_CityArgs, str]):
+    """A trivial tool used to exercise tool-calling wire translation."""
+
+    name = "get_weather"
+    description = "Look up the weather for a city."
+    args_model = _CityArgs
+
+    async def execute(self, args: _CityArgs) -> str:
+        return "sunny"
+
+
+def _function_call_response(
+    call_id: str,
+    tool_name: str,
+    arguments: str,
+) -> Response:
+    """Build a completed `Response` carrying a single `function_call` item.
+
+    `arguments` is the raw JSON string the Responses API uses for call args.
+    """
+
+    return Response(
+        id="resp_test",
+        object="response",
+        created_at=0.0,
+        model="gpt-test",
+        output=[
+            ResponseFunctionToolCall(
+                type="function_call",
+                call_id=call_id,
+                name=tool_name,
+                arguments=arguments,
             )
         ],
         parallel_tool_calls=False,
@@ -683,6 +742,292 @@ async def test_complete_maps_refusal_content_part_to_refusal_stop_reason() -> No
     # is preserved in `parts`
     assert result.message.stop_reason == "refusal"
     assert result.message.text == "I can't help."
+
+
+# Tool-calling tests
+# -----------------------------------------------------------------------------
+
+
+async def test_complete_parses_function_call_into_tool_call_part() -> None:
+    """A response `function_call` item decodes into a `ToolCallPart`."""
+
+    # GIVEN a provider whose mock client returns a function-call response
+    response = _function_call_response("call_1", "get_weather", '{"city": "Paris"}')
+    provider = _provider(_mock_client_returning(response))
+
+    # WHEN `complete` is awaited
+    result = await provider.complete([UserMessage.from_text("weather?")], _settings())
+
+    # THEN the item decodes into a `ToolCallPart`, with JSON-string arguments
+    # parsed into a dict
+    assert result.message.parts == [
+        ToolCallPart(call_id="call_1", tool_name="get_weather", args={"city": "Paris"})
+    ]
+
+
+async def test_complete_parses_empty_arguments_into_empty_dict() -> None:
+    """An empty `arguments` string decodes into an empty args dict."""
+
+    # GIVEN a provider whose mock client returns a function-call response with
+    # an empty arguments string
+    response = _function_call_response("call_1", "ping", "")
+    provider = _provider(_mock_client_returning(response))
+
+    # WHEN `complete` is awaited
+    result = await provider.complete([UserMessage.from_text("ping")], _settings())
+
+    # THEN the call decodes with empty args rather than failing to parse
+    assert result.message.parts == [
+        ToolCallPart(call_id="call_1", tool_name="ping", args={})
+    ]
+
+
+async def test_complete_raises_validation_error_on_malformed_arguments() -> None:
+    """Non-JSON `arguments` map to `ProviderResponseValidationError`."""
+
+    # GIVEN a provider whose mock client returns a function-call response with
+    # arguments that are not valid JSON
+    response = _function_call_response("call_1", "get_weather", "not json")
+    provider = _provider(_mock_client_returning(response))
+
+    # WHEN `complete` is awaited
+    # THEN the decode failure surfaces as a provider validation error
+    with pytest.raises(ProviderResponseValidationError):
+        await provider.complete([UserMessage.from_text("weather?")], _settings())
+
+
+async def test_complete_maps_function_call_to_tool_use_stop_reason() -> None:
+    """A response carrying a `function_call` maps to canonical `"tool_use"`."""
+
+    # GIVEN a provider whose mock client returns a function-call response
+    response = _function_call_response("call_1", "get_weather", '{"city": "Paris"}')
+    provider = _provider(_mock_client_returning(response))
+
+    # WHEN `complete` is awaited
+    result = await provider.complete([UserMessage.from_text("weather?")], _settings())
+
+    # THEN the canonical `stop_reason` is `"tool_use"`
+    assert result.message.stop_reason == "tool_use"
+
+
+async def test_complete_skips_decoding_truncated_tool_call_on_max_tokens() -> None:
+    """A tool call truncated at max_output_tokens maps to max_tokens, not error.
+
+    When OpenAI truncates a `function_call` mid-arguments, the leftover partial
+    JSON must not surface as a schema error: the terminal incomplete reason
+    wins and the truncated call is dropped rather than decoded.
+    """
+
+    # GIVEN a provider whose mock client returns an incomplete
+    # (max_output_tokens) response with a function_call that was cut off
+    # mid-arguments, leaving invalid JSON
+    truncated = ResponseFunctionToolCall(
+        type="function_call",
+        call_id="call_1",
+        name="get_weather",
+        arguments='{"city":',
+    )
+    response = _incomplete_response("max_output_tokens", output=[truncated])
+    provider = _provider(_mock_client_returning(response))
+
+    # WHEN `complete` is awaited
+    result = await provider.complete([UserMessage.from_text("weather?")], _settings())
+
+    # THEN it resolves to the max_tokens stop reason without raising, and the
+    # truncated call is not surfaced as a tool-call part
+    assert result.message.stop_reason == "max_tokens"
+    assert result.message.parts == []
+
+
+async def test_complete_skips_truncated_tool_call_on_reasonless_incomplete() -> None:
+    """An incomplete response with no reason still skips truncated tool calls.
+
+    The skip is gated on `status == "incomplete"`, not on a mapped reason, so a
+    truncated `function_call` does not raise even when the reason is absent; the
+    response maps to a plain `"stop"`.
+    """
+
+    # GIVEN a provider whose mock client returns an incomplete (no reason)
+    # response with a function_call that was cut off mid-arguments, leaving
+    # invalid JSON
+    truncated = ResponseFunctionToolCall(
+        type="function_call",
+        call_id="call_1",
+        name="get_weather",
+        arguments='{"city":',
+    )
+    response = _incomplete_response(None, output=[truncated])
+    provider = _provider(_mock_client_returning(response))
+
+    # WHEN `complete` is awaited
+    result = await provider.complete([UserMessage.from_text("weather?")], _settings())
+
+    # THEN the truncated call is dropped (not decoded) and no error is raised
+    assert result.message.stop_reason == "stop"
+    assert result.message.parts == []
+
+
+async def test_complete_sends_tools_with_name_description_and_schema() -> None:
+    """Each offered tool is sent as a non-strict function tool with a schema."""
+
+    # GIVEN a provider and an offered tool
+    mock_client = _mock_client_returning(_response("ok"))
+    provider = _provider(mock_client)
+
+    # WHEN `complete` is invoked with that tool
+    await provider.complete([UserMessage.from_text("hi")], _settings(), [_Weather()])
+
+    # THEN the OpenAI SDK call carries the tool's name, description, and args
+    # schema, with `strict=False` (raw schema sent as advisory)
+    tools_param = mock_client.responses.create.call_args.kwargs["tools"]
+    assert tools_param == [
+        {
+            "type": "function",
+            "name": "get_weather",
+            "description": "Look up the weather for a city.",
+            "parameters": _CityArgs.model_json_schema(),
+            "strict": False,
+        }
+    ]
+
+
+async def test_complete_omits_tools_when_none_offered() -> None:
+    """No offered tools means the `tools` kwarg is the `omit` sentinel."""
+
+    # GIVEN a provider and no tools
+    mock_client = _mock_client_returning(_response("ok"))
+    provider = _provider(mock_client)
+
+    # WHEN `complete` is invoked without tools
+    await provider.complete([UserMessage.from_text("hi")], _settings())
+
+    # THEN the `tools` kwarg is omitted rather than sent as an empty list
+    assert mock_client.responses.create.call_args.kwargs["tools"] is omit
+
+
+async def test_complete_sends_assistant_tool_call_as_function_call_item() -> None:
+    """An assistant `ToolCallPart` in the input becomes a `function_call`."""
+
+    # GIVEN a continuation transcript: the assistant requested a tool call and
+    # its result was supplied (a re-entry into `complete`)
+    mock_client = _mock_client_returning(_response("ok"))
+    provider = _provider(mock_client)
+    history: list[Message] = [
+        UserMessage.from_text("weather?"),
+        AssistantMessage(
+            parts=[
+                ToolCallPart(
+                    call_id="call_1", tool_name="get_weather", args={"city": "Paris"}
+                )
+            ],
+            stop_reason="tool_use",
+        ),
+        ToolMessage(
+            parts=[
+                ToolResultPart(call_id="call_1", result=ToolResultOk(content="sunny"))
+            ]
+        ),
+    ]
+
+    # WHEN `complete` is invoked
+    await provider.complete(history, _settings())
+
+    # THEN a `function_call` item carries the call's id, name, and JSON-encoded
+    # arguments (this assistant turn has no text, so it emits no `message` item)
+    wire_input = mock_client.responses.create.call_args.kwargs["input"]
+    assistant_items = wire_input[1:]
+    assert [i["type"] for i in assistant_items] == [
+        "function_call",
+        "function_call_output",
+    ]
+    assert assistant_items[0] == {
+        "type": "function_call",
+        "call_id": "call_1",
+        "name": "get_weather",
+        "arguments": '{"city": "Paris"}',
+    }
+
+
+async def test_complete_sends_assistant_text_before_function_call_items() -> None:
+    """An assistant turn with text and a call emits the text `message` first."""
+
+    # GIVEN a transcript whose assistant turn carries both text and a tool call
+    mock_client = _mock_client_returning(_response("ok"))
+    provider = _provider(mock_client)
+    history: list[Message] = [
+        UserMessage.from_text("weather?"),
+        AssistantMessage(
+            parts=[
+                TextPart(text="Let me check."),
+                ToolCallPart(
+                    call_id="call_1", tool_name="get_weather", args={"city": "Paris"}
+                ),
+            ],
+            stop_reason="tool_use",
+        ),
+        ToolMessage(
+            parts=[
+                ToolResultPart(call_id="call_1", result=ToolResultOk(content="sunny"))
+            ]
+        ),
+    ]
+
+    # WHEN `complete` is invoked
+    await provider.complete(history, _settings())
+
+    # THEN the assistant's text leads as a `message` item, followed by the
+    # `function_call` item
+    wire_input = mock_client.responses.create.call_args.kwargs["input"]
+    assistant_items = wire_input[1:]
+    assert [i["type"] for i in assistant_items] == [
+        "message",
+        "function_call",
+        "function_call_output",
+    ]
+    assert assistant_items[0]["role"] == "assistant"
+    assert assistant_items[0]["content"] == "Let me check."
+
+
+async def test_complete_sends_tool_message_as_function_call_output_items() -> None:
+    """A `ToolMessage` becomes one `function_call_output` item per result."""
+
+    # GIVEN a continuation transcript whose assistant requested two tool calls,
+    # now answered with one ok and one error result
+    mock_client = _mock_client_returning(_response("ok"))
+    provider = _provider(mock_client)
+    history: list[Message] = [
+        UserMessage.from_text("weather?"),
+        AssistantMessage(
+            parts=[
+                ToolCallPart(
+                    call_id="ok_1", tool_name="get_weather", args={"city": "Paris"}
+                ),
+                ToolCallPart(
+                    call_id="err_1", tool_name="get_weather", args={"city": "?"}
+                ),
+            ],
+            stop_reason="tool_use",
+        ),
+        ToolMessage(
+            parts=[
+                ToolResultPart(call_id="ok_1", result=ToolResultOk(content="sunny")),
+                ToolResultPart(call_id="err_1", result=ToolResultError(content="boom")),
+            ]
+        ),
+    ]
+
+    # WHEN `complete` is invoked
+    await provider.complete(history, _settings())
+
+    # THEN each result is sent as a `function_call_output` item keyed by
+    # `call_id`; the Responses API has no error flag, so the error status is
+    # carried only in the output text
+    wire_input = mock_client.responses.create.call_args.kwargs["input"]
+    outputs = [i for i in wire_input if i["type"] == "function_call_output"]
+    assert outputs == [
+        {"type": "function_call_output", "call_id": "ok_1", "output": "sunny"},
+        {"type": "function_call_output", "call_id": "err_1", "output": "boom"},
+    ]
 
 
 # Lifecycle tests

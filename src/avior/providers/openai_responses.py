@@ -10,9 +10,10 @@ server-side state is created.
 Install via the optional extra: `pip install avior[openai]`.
 """
 
+import json
 import logging
 from collections.abc import Sequence
-from typing import Any, Literal, assert_never
+from typing import Any, assert_never
 
 try:
     import openai
@@ -20,13 +21,18 @@ try:
     from openai._types import Omit, omit
     from openai.types.responses import (
         EasyInputMessageParam,
+        FunctionToolParam,
         Response,
+        ResponseFunctionToolCall,
+        ResponseFunctionToolCallParam,
+        ResponseInputItemParam,
         ResponseInputParam,
         ResponseOutputMessage,
         ResponseOutputRefusal,
         ResponseOutputText,
         ResponseUsage,
     )
+    from openai.types.responses.response_input_item_param import FunctionCallOutput
 except ImportError as e:
     raise ImportError(
         "The `openai` package is required to use `avior.providers.openai_responses`. "
@@ -46,6 +52,7 @@ from avior.core.messages import (
     StopReason,
     SystemMessage,
     TextPart,
+    ToolCallPart,
     ToolMessage,
     UserMessage,
 )
@@ -54,14 +61,6 @@ from avior.core.tools import Tool
 from avior.core.usage import Usage
 
 logger = logging.getLogger(__name__)
-
-type _OpenAIRole = Literal["user", "assistant"]
-"""OpenAI Responses' per-message role union.
-
-OpenAI Responses' API places system instructions in a top-level `instructions`
-parameter, so the per-message `role` is narrower than avior's canonical
-`Message` (which also admits `SystemMessage`).
-"""
 
 
 class OpenAIResponsesProvider(Provider):
@@ -122,17 +121,17 @@ class OpenAIResponsesProvider(Provider):
                 joined string; non-system messages keep their order in
                 `input`), but the interleaving between the two groups is lost.
             settings: Per-call invocation settings.
-            tools: Not yet supported by this adapter; passing a non-empty
-                sequence raises `NotImplementedError`.  Tool calling for the
-                Responses API lands in a later change.
+            tools: Tools to offer the model.  Each is sent as a Responses
+                function tool with its arguments JSON schema as `parameters`
+                (`strict=False`: the schema guides the model but is not
+                grammar-enforced).  `function_call` items in the response are
+                parsed back into `ToolCallPart`s.
 
         Returns:
             A `ProviderResponse` wrapping the assistant message together with
             the call metadata.
 
         Raises:
-            NotImplementedError: `tools` is non-empty (tool calling not yet
-                implemented for this adapter).
             ProviderHTTPError: The provider returned a 4xx or 5xx HTTP response.
                 `status_code` carries the wire status.
             ProviderResponseValidationError: The provider returned a successful
@@ -144,16 +143,17 @@ class OpenAIResponsesProvider(Provider):
                 preserved as `__cause__`.
         """
 
-        if tools:
-            raise NotImplementedError(
-                "OpenAIResponsesProvider does not support tools yet; "
-                "tool calling for the Responses API lands in a later change."
-            )
-
         logger.debug("complete: model=%s, messages=%d", settings.model, len(messages))
 
         instructions, conversation = self._extract_instructions(messages)
-        wire_input: ResponseInputParam = [self._to_wire(m) for m in conversation]
+
+        # A single avior message can expand to several Responses input items
+        # (an assistant turn with tool calls becomes a `message` item plus one
+        # `function_call` item per call; a tool turn becomes one or more
+        # `function_call_output` items), so the wire input is flat-mapped.
+        wire_input: ResponseInputParam = []
+        for m in conversation:
+            wire_input.extend(self._to_wire(m))
 
         instructions_param: str | Omit = (
             instructions if instructions is not None else omit
@@ -164,6 +164,9 @@ class OpenAIResponsesProvider(Provider):
         max_output_tokens_param: int | Omit = (
             settings.max_tokens if settings.max_tokens is not None else omit
         )
+        tools_param: list[FunctionToolParam] | Omit = (
+            [self._to_tool_param(t) for t in tools] if tools else omit
+        )
 
         try:
             response = await self._client.responses.create(
@@ -172,6 +175,7 @@ class OpenAIResponsesProvider(Provider):
                 model=settings.model,
                 max_output_tokens=max_output_tokens_param,
                 temperature=temperature_param,
+                tools=tools_param,
                 store=False,
             )
         except openai.APIStatusError as e:
@@ -183,31 +187,49 @@ class OpenAIResponsesProvider(Provider):
         except openai.OpenAIError as e:
             raise ProviderError(str(e)) from e
 
-        text_parts: list[AssistantPart] = []
+        # An incomplete response (`status == "incomplete"`) may be truncated
+        # mid-output, so a half-finished `function_call` can carry invalid-JSON
+        # arguments.  Skip tool-call decoding - the call may be garbage, and
+        # decoding it raises on partial JSON.  Text cannot raise, so it is
+        # always collected.
+        incomplete = response.status == "incomplete"
+
+        # Text and tool calls are collected in output order into `parts`.
+        # Refusals are kept in a separate list so that a refusal can override
+        # `parts` (see below).
+        parts: list[AssistantPart] = []
         refusal_parts: list[AssistantPart] = []
         for item in response.output:
             if isinstance(item, ResponseOutputMessage):
                 for content in item.content:
                     match content:
                         case ResponseOutputText():
-                            text_parts.append(TextPart(text=content.text))
+                            parts.append(TextPart(text=content.text))
                         case ResponseOutputRefusal():
                             refusal_parts.append(TextPart(text=content.refusal))
 
-        # When the response interleaves text and refusal (rare in non-
-        # streaming), refusal wins: the refusal is the authoritative final
-        # word and the partial text attempt is dropped.  A `RefusalPart`
-        # type would let us keep both; deferred until parts gain richer
-        # discriminator support.
-        parts = refusal_parts or text_parts
-        stop_reason = self._map_stop_reason(response, has_refusal=bool(refusal_parts))
+            elif isinstance(item, ResponseFunctionToolCall):
+                if not incomplete:
+                    parts.append(self._to_tool_call_part(item))
+
+        # When the response contains both text and a refusal (rare in non-
+        # streaming), the refusal wins: it is the authoritative final word, and
+        # the partial text is dropped.
+        final_parts = refusal_parts or parts
+
+        stop_reason = self._map_stop_reason(
+            response,
+            has_refusal=bool(refusal_parts),
+            has_tool_call=any(isinstance(p, ToolCallPart) for p in parts),
+        )
         raw_usage = (
             response.usage.model_dump(mode="json")
             if response.usage is not None
             else None
         )
+
         return ProviderResponse(
-            message=AssistantMessage(parts=parts, stop_reason=stop_reason),
+            message=AssistantMessage(parts=final_parts, stop_reason=stop_reason),
             usage=self._map_usage(response.usage),
             raw_usage=raw_usage,
             response_id=response.id,
@@ -256,20 +278,30 @@ class OpenAIResponsesProvider(Provider):
         return mapped
 
     @staticmethod
-    def _map_stop_reason(response: Response, *, has_refusal: bool) -> StopReason:
-        """Map OpenAI Responses signals to canonical `StopReason`.
+    def _map_stop_reason(
+        response: Response,
+        *,
+        has_refusal: bool,
+        has_tool_call: bool,
+    ) -> StopReason:
+        """Map OpenAI Responses signals to a canonical `StopReason`.
 
-        Two channels are checked, in order:
+        Channels are checked in order; the first match wins:
 
-        1. `status == "incomplete"` with `incomplete_details.reason` -
-           `"max_output_tokens"` -> `"max_tokens"`, `"content_filter"` ->
-           `"content_filter"`.  Other reasons (or missing details) fall
-           through to (2).
-        2. A `ResponseOutputRefusal` content part on an otherwise completed
-           response - the model itself declined to answer.
+        1. `status == "incomplete"` with `incomplete_details.reason`:
+           - `"max_output_tokens"` -> `"max_tokens"` (truncated at the cap);
+           - `"content_filter"` -> `"content_filter"` (blocked).
 
-        Anything else maps to `"stop"`; the orchestrator treats the response as
-        a normal completion and decides what to do from `parts` alone.
+           An incomplete response whose `reason` the SDK left unset falls
+           through (the field is typed `Optional`, though OpenAI sets it in
+           practice).
+        2. A `ResponseOutputRefusal` part on a completed response ->
+           `"refusal"` (the model itself declined).
+        3. One or more `function_call` items -> `"tool_use"`.  The Responses
+           API has no dedicated stop-reason field for this; their presence is
+           the signal.
+        4. Anything else -> `"stop"`: a normal completion.  The caller then
+           decides what to do from `parts` alone.
         """
 
         if response.status == "incomplete":
@@ -280,11 +312,16 @@ class OpenAIResponsesProvider(Provider):
                         return "max_tokens"
                     case "content_filter":
                         return "content_filter"
-                    case _:
+                    case None:
                         pass
+                    case _:
+                        assert_never(details.reason)
 
         if has_refusal:
             return "refusal"
+
+        if has_tool_call:
+            return "tool_use"
 
         return "stop"
 
@@ -301,9 +338,52 @@ class OpenAIResponsesProvider(Provider):
             await self._client.close()
 
     @staticmethod
+    def _to_tool_param(tool: Tool[Any, Any]) -> FunctionToolParam:
+        """Convert an avior `Tool` to a Responses function-tool definition.
+
+        The tool's `args_model` JSON schema is sent as-is with `strict=False`:
+        the schema guides the model but is not grammar-enforced, so the raw
+        Pydantic schema (optional fields, defaults, open objects) is accepted
+        unchanged.  This keeps the adapter symmetric with the Anthropic one;
+        strict mode would require a lossy schema rewrite and is a separate
+        opt-in.
+        """
+
+        return FunctionToolParam(
+            type="function",
+            name=tool.name,
+            description=tool.description,
+            parameters=tool.args_model.model_json_schema(),
+            strict=False,
+        )
+
+    @staticmethod
+    def _to_tool_call_part(item: ResponseFunctionToolCall) -> ToolCallPart:
+        """Decode a Responses `function_call` output item into a `ToolCallPart`.
+
+        The Responses API carries call arguments as a JSON string; it is parsed
+        into the `dict` that `ToolCallPart.args` expects (an empty string maps
+        to `{}`).  `call_id` (not `id`) is kept so the matching tool result can
+        be correlated back on the next request.
+        """
+
+        try:
+            args: dict[str, Any] = json.loads(item.arguments) if item.arguments else {}
+        except json.JSONDecodeError as e:
+            raise ProviderResponseValidationError(
+                f"OpenAI returned tool-call arguments that are not valid JSON: {e}"
+            ) from e
+
+        return ToolCallPart(
+            call_id=item.call_id,
+            tool_name=item.name,
+            args=args,
+        )
+
+    @staticmethod
     def _extract_instructions(
         messages: Sequence[Message],
-    ) -> tuple[str | None, list[UserMessage | AssistantMessage]]:
+    ) -> tuple[str | None, list[UserMessage | AssistantMessage | ToolMessage]]:
         """Pull all `SystemMessage`s out of the conversation.
 
         System content is lifted to the top-level `instructions` parameter
@@ -322,44 +402,88 @@ class OpenAIResponsesProvider(Provider):
         """
 
         texts: list[str] = []
-        rest: list[UserMessage | AssistantMessage] = []
+        rest: list[UserMessage | AssistantMessage | ToolMessage] = []
         for msg in messages:
             match msg:
                 case SystemMessage():
                     if msg.text:
                         texts.append(msg.text)
-                case UserMessage() | AssistantMessage():
+                case UserMessage() | AssistantMessage() | ToolMessage():
                     rest.append(msg)
-                case ToolMessage():
-                    raise NotImplementedError(
-                        "OpenAIResponsesProvider does not support tool messages "
-                        "yet; tool calling for the Responses API lands later."
-                    )
                 case _:
                     assert_never(msg)
 
         return ("\n\n".join(texts) if texts else None), rest
 
     @staticmethod
-    def _to_wire(message: UserMessage | AssistantMessage) -> EasyInputMessageParam:
-        """Convert an avior non-system `Message` to an OpenAI Responses input
-        item.
+    def _to_wire(
+        message: UserMessage | AssistantMessage | ToolMessage,
+    ) -> list[ResponseInputItemParam]:
+        """Convert an avior non-system `Message` to Responses input items.
 
         `SystemMessage`s are not accepted - they are extracted into the
         top-level `instructions` parameter by `_extract_instructions`
         upstream.
+
+        Returns a list because, unlike a chat-style wire format, the Responses
+        API carries tool calls and tool results as their own top-level items
+        rather than nested in a message:
+
+        - `UserMessage` -> a single `user` message item.
+        - `AssistantMessage` -> a single `message` item with the assistant's
+          text (omitted when the turn is tool calls only), followed by one
+          `function_call` item per tool call in order.  The tool calls keep
+          their order, but the text is always hoisted ahead of them.
+        - `ToolMessage` -> one `function_call_output` item per result, matched
+          to its call by `call_id`.  The Responses API has no error flag on a
+          tool output, so an error result is sent as its text content (the
+          status distinction is carried only in that text).
         """
 
         match message:
             case UserMessage():
-                role: _OpenAIRole = "user"
+                return [
+                    EasyInputMessageParam(
+                        role="user",
+                        type="message",
+                        content=message.text or "",
+                    )
+                ]
+
             case AssistantMessage():
-                role = "assistant"
+                items: list[ResponseInputItemParam] = []
+
+                if message.text:
+                    items.append(
+                        EasyInputMessageParam(
+                            role="assistant",
+                            type="message",
+                            content=message.text,
+                        )
+                    )
+
+                for part in message.parts:
+                    if isinstance(part, ToolCallPart):
+                        items.append(
+                            ResponseFunctionToolCallParam(
+                                type="function_call",
+                                call_id=part.call_id,
+                                name=part.tool_name,
+                                arguments=json.dumps(part.args),
+                            )
+                        )
+
+                return items
+
+            case ToolMessage():
+                return [
+                    FunctionCallOutput(
+                        type="function_call_output",
+                        call_id=p.call_id,
+                        output=p.result.content,
+                    )
+                    for p in message.parts
+                ]
+
             case _:
                 assert_never(message)
-
-        return EasyInputMessageParam(
-            role=role,
-            type="message",
-            content=message.text or "",
-        )
