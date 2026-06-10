@@ -57,9 +57,8 @@ async def test_runner_run_against_openai_returns_non_empty_text(
     the transport contract (a non-empty string), not on response content.
     """
 
-    # GIVEN an agent using the real OpenAI Responses provider and a cheap model
+    # GIVEN an agent and a runner using the real OpenAI Responses provider
     agent = Agent(
-        provider=openai_responses_provider,
         instructions="Reply with one short word.",
         model_settings=ModelSettings(
             model="gpt-4.1-nano",
@@ -68,7 +67,7 @@ async def test_runner_run_against_openai_returns_non_empty_text(
     )
 
     # WHEN we run a trivial prompt
-    result = await Runner.run(agent, "Say hello.")
+    result = await Runner(provider=openai_responses_provider).run(agent, "Say hello.")
 
     # THEN we get a non-empty text response
     assert result.output.strip() != ""
@@ -88,7 +87,6 @@ async def test_runner_run_raises_max_tokens_exceeded_against_openai(
     # (OpenAI Responses API enforces `max_output_tokens >= 16`; 16 is enough
     # to trigger truncation for a long-story prompt.)
     agent = Agent(
-        provider=openai_responses_provider,
         instructions="Write a long story.",
         model_settings=ModelSettings(
             model="gpt-4.1-nano",
@@ -99,7 +97,7 @@ async def test_runner_run_raises_max_tokens_exceeded_against_openai(
     # WHEN `Runner.run` is invoked
     # THEN `MaxTokensExceededError` is raised
     with pytest.raises(MaxTokensExceededError):
-        await Runner.run(agent, "Tell me a story.")
+        await Runner(provider=openai_responses_provider).run(agent, "Tell me a story.")
 
 
 async def test_runner_run_against_openai_calls_a_tool_end_to_end(
@@ -116,7 +114,6 @@ async def test_runner_run_against_openai_calls_a_tool_end_to_end(
     # GIVEN an agent offered a tool whose result the model cannot otherwise know
     tool = _MagicNumber()
     agent = Agent(
-        provider=openai_responses_provider,
         instructions=(
             "When asked for a city's magic number, you must call the "
             "get_magic_number tool, then state the number it returns."
@@ -126,7 +123,9 @@ async def test_runner_run_against_openai_calls_a_tool_end_to_end(
     )
 
     # WHEN we run a prompt that requires the tool
-    result = await Runner.run(agent, "What is the magic number for Paris?")
+    result = await Runner(provider=openai_responses_provider).run(
+        agent, "What is the magic number for Paris?"
+    )
 
     # THEN the tool was actually invoked with the parsed argument
     assert tool.calls == ["Paris"]

@@ -14,12 +14,15 @@ from avior.providers.anthropic import AnthropicProvider
 
 async def main() -> None:
     agent = Agent(
-        provider=AnthropicProvider(),
         instructions="You are a concise assistant.  Reply in one sentence.",
         model_settings=ModelSettings(model="claude-haiku-4-5-20251001"),
     )
-    result = await Runner.run(agent, "Say hello to avior.")
-    print(result.output)
+
+    # `async with` owns the provider's lifecycle; the runner only borrows it.
+    async with AnthropicProvider() as provider:
+        runner = Runner(provider=provider)
+        result = await runner.run(agent, "Say hello to avior.")
+        print(result.output)
 
 
 if __name__ == "__main__":

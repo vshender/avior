@@ -38,13 +38,15 @@ class GetWeather(Tool[WeatherArgs, str]):
 
 async def main() -> None:
     agent = Agent(
-        provider=AnthropicProvider(),
         instructions="You are a helpful assistant.  Use tools when relevant.",
         model_settings=ModelSettings(model="claude-haiku-4-5-20251001"),
         tools=[GetWeather()],
     )
-    result = await Runner.run(agent, "What's the weather in Paris?")
-    print(result.output)
+    # `async with` owns the provider's lifecycle; the runner only borrows it.
+    async with AnthropicProvider() as provider:
+        runner = Runner(provider=provider)
+        result = await runner.run(agent, "What's the weather in Paris?")
+        print(result.output)
 
 
 if __name__ == "__main__":

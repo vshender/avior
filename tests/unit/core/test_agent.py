@@ -6,7 +6,6 @@ from pydantic import BaseModel
 from avior.core.agent import Agent
 from avior.core.exceptions import ConfigurationError
 from avior.core.provider import ModelSettings
-from avior.core.testing import StubProvider
 from avior.core.tools import Tool
 
 
@@ -44,7 +43,6 @@ def test_agent_rejects_duplicate_tool_names() -> None:
     # THEN construction raises `ConfigurationError` naming the duplicate
     with pytest.raises(ConfigurationError, match="dup"):
         Agent(
-            provider=StubProvider(lambda _messages, _settings: "ok"),
             instructions="be helpful",
             model_settings=ModelSettings(model="test-model"),
             tools=[_Ping(), _Pong()],
@@ -58,7 +56,6 @@ def test_agent_snapshots_tools_and_does_not_alias_caller_list() -> None:
     ping = _Ping()
     tools: list[Tool[_NoArgs, str]] = [ping]
     agent = Agent(
-        provider=StubProvider(lambda _messages, _settings: "ok"),
         instructions="be helpful",
         model_settings=ModelSettings(model="test-model"),
         tools=tools,

@@ -24,15 +24,15 @@ from avior.core.usage import Usage
 async def test_runner_run_returns_assistant_text_for_hello_smoke() -> None:
     """`Runner.run` returns the assistant's text for a hello prompt."""
 
-    # GIVEN an agent whose provider always replies "Hi!"
+    # GIVEN an agent and a runner whose provider replies "Hi!"
     agent = Agent(
-        provider=StubProvider.from_responses(["Hi!"]),
         instructions="you are helpful",
         model_settings=ModelSettings(model="test-model"),
     )
+    runner = Runner(provider=StubProvider.from_responses(["Hi!"]))
 
     # WHEN the runner is invoked with a hello prompt
-    result = await Runner.run(agent, "hello")
+    result = await runner.run(agent, "hello")
 
     # THEN the result's output is the assistant's reply
     assert result.output == "Hi!"
@@ -41,16 +41,16 @@ async def test_runner_run_returns_assistant_text_for_hello_smoke() -> None:
 async def test_runner_run_prepends_system_message_with_agent_instructions() -> None:
     """`Runner.run` sends `agent.instructions` as the first (system) message."""
 
-    # GIVEN an agent with known instructions and a recording stub
-    provider = StubProvider(lambda _msgs, _settings: "ok")
+    # GIVEN an agent and a runner whose provider is a recording stub
     agent = Agent(
-        provider=provider,
         instructions="you are helpful",
         model_settings=ModelSettings(model="test-model"),
     )
+    provider = StubProvider.from_responses(["ok"])
+    runner = Runner(provider=provider)
 
     # WHEN the runner is invoked
-    await Runner.run(agent, "hello")
+    await runner.run(agent, "hello")
 
     # THEN the first message sent to the provider is a `SystemMessage`
     # carrying the agent's instructions
@@ -61,16 +61,16 @@ async def test_runner_run_prepends_system_message_with_agent_instructions() -> N
 async def test_runner_run_appends_user_message_with_input() -> None:
     """`Runner.run` sends the prompt as a user message after the system one."""
 
-    # GIVEN an agent backed by a recording stub
-    provider = StubProvider(lambda _msgs, _settings: "ok")
+    # GIVEN an agent and a runner whose provider is a recording stub
     agent = Agent(
-        provider=provider,
         instructions="you are helpful",
         model_settings=ModelSettings(model="test-model"),
     )
+    provider = StubProvider.from_responses(["ok"])
+    runner = Runner(provider=provider)
 
     # WHEN the runner is invoked with a specific prompt
-    await Runner.run(agent, "what is 2+2?")
+    await runner.run(agent, "what is 2+2?")
 
     # THEN the second message sent is a `UserMessage` carrying the prompt,
     # and exactly two messages are sent (system + user)
@@ -82,17 +82,18 @@ async def test_runner_run_appends_user_message_with_input() -> None:
 async def test_runner_run_passes_agent_model_settings_to_provider() -> None:
     """`Runner.run` forwards `agent.model_settings` to the provider as-is."""
 
-    # GIVEN an agent with specific model settings
+    # GIVEN an agent with specific model settings, and a runner whose provider
+    # is a recording stub
     settings = ModelSettings(model="claude-3-5-sonnet", temperature=0.2, max_tokens=512)
-    provider = StubProvider(lambda _msgs, _settings: "ok")
     agent = Agent(
-        provider=provider,
         instructions="you are helpful",
         model_settings=settings,
     )
+    provider = StubProvider.from_responses(["ok"])
+    runner = Runner(provider=provider)
 
     # WHEN the runner is invoked
-    await Runner.run(agent, "hello")
+    await runner.run(agent, "hello")
 
     # THEN the provider receives the same settings object by identity
     assert provider.calls[-1].settings is settings
@@ -101,16 +102,17 @@ async def test_runner_run_passes_agent_model_settings_to_provider() -> None:
 async def test_runner_run_returns_empty_string_when_response_has_no_text() -> None:
     """`Runner.run` returns `""` when the response has no text parts."""
 
-    # GIVEN an agent whose provider replies with an empty assistant message
-    empty_response = AssistantMessage(parts=[], stop_reason="stop")
+    # GIVEN an agent and a runner whose provider replies with an empty assistant
+    # message
     agent = Agent(
-        provider=StubProvider(lambda _msgs, _settings: empty_response),
         instructions="you are helpful",
         model_settings=ModelSettings(model="test-model"),
     )
+    empty_response = AssistantMessage(parts=[], stop_reason="stop")
+    runner = Runner(provider=StubProvider.from_responses([empty_response]))
 
     # WHEN the runner is invoked
-    result = await Runner.run(agent, "hello")
+    result = await runner.run(agent, "hello")
 
     # THEN the output is an empty string (not `None`)
     assert result.output == ""
@@ -119,18 +121,19 @@ async def test_runner_run_returns_empty_string_when_response_has_no_text() -> No
 async def test_runner_run_raises_on_max_tokens_stop_reason() -> None:
     """`Runner.run` raises `MaxTokensExceededError` on max-tokens stop."""
 
-    # GIVEN an agent whose provider returns a message marked `max_tokens`
-    truncated = AssistantMessage(parts=[], stop_reason="max_tokens")
+    # GIVEN an agent and a runner whose provider returns a message marked
+    # `max_tokens`
     agent = Agent(
-        provider=StubProvider(lambda _msgs, _settings: truncated),
         instructions="you are helpful",
         model_settings=ModelSettings(model="test-model", max_tokens=64),
     )
+    truncated = AssistantMessage(parts=[], stop_reason="max_tokens")
+    runner = Runner(provider=StubProvider.from_responses([truncated]))
 
     # WHEN `Runner.run` is invoked
     # THEN it raises `MaxTokensExceededError`
     with pytest.raises(MaxTokensExceededError):
-        await Runner.run(agent, "hello")
+        await runner.run(agent, "hello")
 
 
 async def test_runner_run_max_tokens_message_omits_none_when_unset() -> None:
@@ -141,77 +144,83 @@ async def test_runner_run_max_tokens_message_omits_none_when_unset() -> None:
     describe the default-cap situation in actionable terms.
     """
 
-    # GIVEN an agent with no explicit `max_tokens`, whose provider truncated
-    truncated = AssistantMessage(parts=[], stop_reason="max_tokens")
+    # GIVEN an agent with no explicit `max_tokens` and a provider that returns
+    # a message marked `max_tokens`
     agent = Agent(
-        provider=StubProvider(lambda _msgs, _settings: truncated),
         instructions="you are helpful",
         model_settings=ModelSettings(model="test-model"),  # max_tokens=None
     )
+    truncated = AssistantMessage(parts=[], stop_reason="max_tokens")
+    runner = Runner(provider=StubProvider.from_responses([truncated]))
 
     # WHEN `Runner.run` is invoked
-    # THEN the exception is raised and the message does not leak "None"
+    # THEN the exception is raised, the message points at `max_tokens` as the
+    # actionable knob, and it does not leak "None"
     with pytest.raises(MaxTokensExceededError) as exc_info:
-        await Runner.run(agent, "hello")
-    assert "None" not in str(exc_info.value)
+        await runner.run(agent, "hello")
+    message = str(exc_info.value)
+    assert "max_tokens" in message
+    assert "None" not in message
 
 
 async def test_runner_run_raises_on_content_filter_stop_reason() -> None:
     """`Runner.run` raises `ContentFilterError` on content-filter stop."""
 
-    # GIVEN an agent whose provider returns a message marked `content_filter`
-    filtered = AssistantMessage(parts=[], stop_reason="content_filter")
+    # GIVEN an agent and a runner whose provider returns a message marked
+    # `content_filter`
     agent = Agent(
-        provider=StubProvider(lambda _msgs, _settings: filtered),
         instructions="you are helpful",
         model_settings=ModelSettings(model="test-model"),
     )
+    filtered = AssistantMessage(parts=[], stop_reason="content_filter")
+    runner = Runner(provider=StubProvider.from_responses([filtered]))
 
     # WHEN `Runner.run` is invoked
     # THEN it raises `ContentFilterError`
     with pytest.raises(ContentFilterError):
-        await Runner.run(agent, "hello")
+        await runner.run(agent, "hello")
 
 
 async def test_runner_run_raises_on_refusal_stop_reason() -> None:
     """`Runner.run` raises `ModelRefusalError` carrying the refusal text."""
 
-    # GIVEN an agent whose provider returns a refusal-marked message
+    # GIVEN an agent and a runner whose provider returns a refusal-marked
+    # message
+    agent = Agent(
+        instructions="you are helpful",
+        model_settings=ModelSettings(model="test-model"),
+    )
     refusal_text = "I can't help with that."
     refusal = AssistantMessage(
         parts=[TextPart(text=refusal_text)],
         stop_reason="refusal",
     )
-    agent = Agent(
-        provider=StubProvider(lambda _msgs, _settings: refusal),
-        instructions="you are helpful",
-        model_settings=ModelSettings(model="test-model"),
-    )
+    runner = Runner(provider=StubProvider.from_responses([refusal]))
 
     # WHEN `Runner.run` is invoked
     # THEN `ModelRefusalError` is raised with the model's refusal text
     # preserved on the exception
     with pytest.raises(ModelRefusalError) as exc_info:
-        await Runner.run(agent, "hello")
+        await runner.run(agent, "hello")
     assert exc_info.value.refusal_text == refusal_text
 
 
 async def test_runner_run_accepts_normal_stop_reason() -> None:
     """`Runner.run` returns text when `stop_reason` is the normal `"stop"`."""
 
-    # GIVEN an agent whose provider returns a normal completion
+    # GIVEN an agent and a runner whose provider returns a normal completion
+    agent = Agent(
+        instructions="you are helpful",
+        model_settings=ModelSettings(model="test-model"),
+    )
     normal = AssistantMessage(
         parts=[TextPart(text="Hi!")],
         stop_reason="stop",
     )
-    agent = Agent(
-        provider=StubProvider(lambda _msgs, _settings: normal),
-        instructions="you are helpful",
-        model_settings=ModelSettings(model="test-model"),
-    )
+    runner = Runner(provider=StubProvider.from_responses([normal]))
 
     # WHEN `Runner.run` is invoked
-    result = await Runner.run(agent, "hello")
+    result = await runner.run(agent, "hello")
 
     # THEN the assistant's text is returned as the output
     assert result.output == "Hi!"
@@ -220,20 +229,21 @@ async def test_runner_run_accepts_normal_stop_reason() -> None:
 async def test_runner_run_carries_usage_from_provider_response() -> None:
     """`Runner.run` surfaces the provider response's usage on the result."""
 
-    # GIVEN an agent whose provider reports token usage for its call
+    # GIVEN an agent and a runner whose provider reports token usage for its
+    # call
+    agent = Agent(
+        instructions="you are helpful",
+        model_settings=ModelSettings(model="test-model"),
+    )
     usage = Usage(input_tokens=11, output_tokens=7)
     response = ProviderResponse(
         message=AssistantMessage(parts=[TextPart(text="Hi!")], stop_reason="stop"),
         usage=usage,
     )
-    agent = Agent(
-        provider=StubProvider(lambda _msgs, _settings: response),
-        instructions="you are helpful",
-        model_settings=ModelSettings(model="test-model"),
-    )
+    runner = Runner(provider=StubProvider.from_responses([response]))
 
     # WHEN the runner is invoked
-    result = await Runner.run(agent, "hello")
+    result = await runner.run(agent, "hello")
 
     # THEN the run result carries that usage
     assert result.usage == usage
@@ -242,15 +252,15 @@ async def test_runner_run_carries_usage_from_provider_response() -> None:
 async def test_runner_run_usage_is_none_when_provider_reports_none() -> None:
     """`Runner.run` leaves `usage` as `None` when the provider reports none."""
 
-    # GIVEN an agent whose provider's response carries no usage
+    # GIVEN an agent and a runner whose provider's response carries no usage
     agent = Agent(
-        provider=StubProvider.from_responses(["Hi!"]),
         instructions="you are helpful",
         model_settings=ModelSettings(model="test-model"),
     )
+    runner = Runner(provider=StubProvider.from_responses(["Hi!"]))
 
     # WHEN the runner is invoked
-    result = await Runner.run(agent, "hello")
+    result = await runner.run(agent, "hello")
 
     # THEN the result's usage is `None`
     assert result.usage is None
@@ -259,15 +269,15 @@ async def test_runner_run_usage_is_none_when_provider_reports_none() -> None:
 async def test_runner_run_result_messages_exclude_system_and_mark_new_turn() -> None:
     """The result stores input plus reply, but not the system message."""
 
-    # GIVEN an agent whose provider replies "Hi!"
+    # GIVEN an agent and a runner whose provider replies "Hi!"
     agent = Agent(
-        provider=StubProvider.from_responses(["Hi!"]),
         instructions="you are helpful",
         model_settings=ModelSettings(model="test-model"),
     )
+    runner = Runner(provider=StubProvider.from_responses(["Hi!"]))
 
     # WHEN the runner is invoked with a string prompt
-    result = await Runner.run(agent, "hello")
+    result = await runner.run(agent, "hello")
 
     # THEN the transcript is the input user turn followed by the assistant
     # reply, with no system turn
@@ -284,13 +294,14 @@ async def test_runner_run_result_messages_exclude_system_and_mark_new_turn() -> 
 async def test_runner_run_accepts_message_list_input() -> None:
     """`Runner.run` accepts existing conversation messages as input."""
 
-    # GIVEN an agent backed by a recording stub and a prior conversation
-    provider = StubProvider(lambda _msgs, _settings: "I'm well.")
+    # GIVEN an agent, a runner whose provider is a recording stub, and a prior
+    # conversation
     agent = Agent(
-        provider=provider,
         instructions="you are helpful",
         model_settings=ModelSettings(model="test-model"),
     )
+    provider = StubProvider.from_responses(["I'm well."])
+    runner = Runner(provider=provider)
     history: list[Message] = [
         UserMessage.from_text("hi"),
         AssistantMessage(parts=[TextPart(text="Hello!")], stop_reason="stop"),
@@ -298,7 +309,7 @@ async def test_runner_run_accepts_message_list_input() -> None:
     ]
 
     # WHEN the runner is invoked with that transcript as input
-    result = await Runner.run(agent, history)
+    result = await runner.run(agent, history)
 
     # THEN the provider receives the system turn followed by the whole input
     assert provider.calls[-1].messages == [
@@ -315,17 +326,17 @@ async def test_runner_run_accepts_message_list_input() -> None:
 async def test_runner_run_threads_result_messages_into_next_run() -> None:
     """A result's `messages` can be passed back as the next run's input."""
 
-    # GIVEN an agent whose provider replies "A1" then "A2"
-    provider = StubProvider.from_responses(["A1", "A2"])
+    # GIVEN an agent and a runner whose provider replies "A1" then "A2"
     agent = Agent(
-        provider=provider,
         instructions="you are helpful",
         model_settings=ModelSettings(model="test-model"),
     )
+    provider = StubProvider.from_responses(["A1", "A2"])
+    runner = Runner(provider=provider)
 
     # WHEN a first run is continued by threading its messages plus a new turn
-    first = await Runner.run(agent, "Q1")
-    second = await Runner.run(agent, [*first.messages, UserMessage.from_text("Q2")])
+    first = await runner.run(agent, "Q1")
+    second = await runner.run(agent, [*first.messages, UserMessage.from_text("Q2")])
 
     # THEN the second call carries the full prior conversation after the system
     # turn

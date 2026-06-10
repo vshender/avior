@@ -24,17 +24,37 @@ from avior.core.messages import (
     ToolResultPart,
     UserMessage,
 )
-from avior.core.provider import ModelSettings
+from avior.core.provider import ModelSettings, Provider
 from avior.core.result import RunResult
 from avior.core.tools import Tool
 from avior.core.usage import Usage
 
 
 class Runner:
-    """Static-method orchestrator for `Agent` execution."""
+    """Orchestrator that drives `Agent` execution against a `Provider`.
 
-    @staticmethod
+    A runner holds the `Provider` that performs the model calls.  One runner can
+    drive many agents, and the same agent can be driven by different runners.
+
+    The runner *borrows* the provider: it does not own the provider's lifecycle.
+    Open and close the provider yourself, typically with `async with provider:`,
+    so resource ownership stays explicit and a single provider can be shared
+    across runners.  The runner is therefore not itself a context manager.
+    """
+
+    def __init__(self, *, provider: Provider) -> None:
+        """Build a runner that drives agents against `provider`.
+
+        Args:
+            provider: The `Provider` that performs every model call this runner
+                makes.  The runner borrows it - the caller owns its lifecycle
+                (see the class docstring).
+        """
+
+        self.provider = provider
+
     async def run(
+        self,
         agent: Agent,
         input: str | Sequence[Message],
         *,
@@ -42,9 +62,10 @@ class Runner:
     ) -> RunResult:
         """Run `agent` on `input` and return the run result.
 
-        Drives the agent loop: each iteration sends the transcript to the model;
-        if the model requests tool calls they are executed and their results
-        appended, and the loop continues; otherwise the response is final.
+        Drives the agent loop: each iteration sends the transcript to the
+        runner's provider; if the model requests tool calls they are executed
+        and their results appended, and the loop continues; otherwise the
+        response is final.
 
         Args:
             agent: The configured agent to drive.
@@ -83,7 +104,7 @@ class Runner:
         usages: list[Usage] = []
         for _ in range(max_iter):
             messages: list[Message] = [system, *input_messages, *generated]
-            response = await agent.provider.complete(
+            response = await self.provider.complete(
                 messages, agent.model_settings, agent.tools
             )
             message = response.message

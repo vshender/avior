@@ -6,16 +6,13 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from avior.core.exceptions import ConfigurationError
-from avior.core.provider import ModelSettings, Provider
+from avior.core.provider import ModelSettings
 from avior.core.tools import Tool
 
 
 @dataclass(frozen=True, kw_only=True)
 class Agent:
-    """Agent definition.
-
-    Holds the static configuration that `Runner` uses to drive a conversation.
-    """
+    """A declarative definition of agent behavior that a `Runner` drives."""
 
     instructions: str
     """System instructions for the model, prepended as a `SystemMessage` before
@@ -28,9 +25,6 @@ class Agent:
     Snapshotted to a tuple at construction, so the agent does not alias the
     caller's sequence.
     """
-
-    provider: Provider
-    """The `Provider` that performs this agent's model calls."""
 
     model_settings: ModelSettings
     """The model invocation settings used for every model call."""

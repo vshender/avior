@@ -57,9 +57,8 @@ async def test_runner_run_against_anthropic_returns_non_empty_text(
     transport contract (a non-empty string), not on response content.
     """
 
-    # GIVEN an agent using the real Anthropic provider and a cheap model
+    # GIVEN an agent and a runner using the real Anthropic provider
     agent = Agent(
-        provider=anthropic_provider,
         instructions="Reply with one short word.",
         model_settings=ModelSettings(
             model="claude-haiku-4-5-20251001",
@@ -68,7 +67,7 @@ async def test_runner_run_against_anthropic_returns_non_empty_text(
     )
 
     # WHEN we run a trivial prompt
-    result = await Runner.run(agent, "Say hello.")
+    result = await Runner(provider=anthropic_provider).run(agent, "Say hello.")
 
     # THEN we get a non-empty text response
     assert result.output.strip() != ""
@@ -85,7 +84,6 @@ async def test_runner_run_raises_max_tokens_exceeded_against_anthropic(
 
     # GIVEN an agent with `model_settings.max_tokens` too small to complete
     agent = Agent(
-        provider=anthropic_provider,
         instructions="Write a long story.",
         model_settings=ModelSettings(
             model="claude-haiku-4-5-20251001",
@@ -96,7 +94,7 @@ async def test_runner_run_raises_max_tokens_exceeded_against_anthropic(
     # WHEN `Runner.run` is invoked
     # THEN `MaxTokensExceededError` is raised
     with pytest.raises(MaxTokensExceededError):
-        await Runner.run(agent, "Tell me a story.")
+        await Runner(provider=anthropic_provider).run(agent, "Tell me a story.")
 
 
 async def test_runner_run_against_anthropic_calls_a_tool_end_to_end(
@@ -113,7 +111,6 @@ async def test_runner_run_against_anthropic_calls_a_tool_end_to_end(
     # GIVEN an agent offered a tool whose result the model cannot otherwise know
     tool = _MagicNumber()
     agent = Agent(
-        provider=anthropic_provider,
         instructions=(
             "When asked for a city's magic number, you must call the "
             "get_magic_number tool, then state the number it returns."
@@ -126,7 +123,9 @@ async def test_runner_run_against_anthropic_calls_a_tool_end_to_end(
     )
 
     # WHEN we run a prompt that requires the tool
-    result = await Runner.run(agent, "What is the magic number for Paris?")
+    result = await Runner(provider=anthropic_provider).run(
+        agent, "What is the magic number for Paris?"
+    )
 
     # THEN the tool was actually invoked with the parsed argument
     assert tool.calls == ["Paris"]

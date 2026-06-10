@@ -35,11 +35,10 @@ class _Echo(Tool[_EchoArgs, str]):
         return f"echo:{args.value}"
 
 
-def _agent(provider: StubProvider, *, max_iter: int = 10) -> Agent:
-    """Build an `Agent` wired to `provider` with a single `_Echo` tool."""
+def _agent(*, max_iter: int = 10) -> Agent:
+    """Build an `Agent` with a single `_Echo` tool."""
 
     return Agent(
-        provider=provider,
         instructions="be helpful",
         model_settings=ModelSettings(model="test-model"),
         tools=[_Echo()],
@@ -72,7 +71,7 @@ async def test_runner_dispatches_tool_call_then_returns_final() -> None:
     )
 
     # WHEN the runner is invoked
-    result = await Runner.run(_agent(provider), "please echo hi")
+    result = await Runner(provider=provider).run(_agent(), "please echo hi")
 
     # THEN the final text is returned
     assert result.output == "All done."
@@ -109,14 +108,13 @@ async def test_runner_serializes_base_model_tool_result_as_json() -> None:
         ]
     )
     agent = Agent(
-        provider=provider,
         instructions="be helpful",
         model_settings=ModelSettings(model="test-model"),
         tools=[_GetWeather()],
     )
 
     # WHEN the runner is invoked
-    result = await Runner.run(agent, "weather in Paris?")
+    result = await Runner(provider=provider).run(agent, "weather in Paris?")
 
     # THEN the model's JSON dump is what gets fed back to the model
     tool_messages = [m for m in result.messages if isinstance(m, ToolMessage)]
@@ -143,14 +141,13 @@ async def test_runner_serializes_other_tool_result_as_json_dump() -> None:
         ]
     )
     agent = Agent(
-        provider=provider,
         instructions="be helpful",
         model_settings=ModelSettings(model="test-model"),
         tools=[_GetWeather()],
     )
 
     # WHEN the runner is invoked
-    result = await Runner.run(agent, "weather in Paris?")
+    result = await Runner(provider=provider).run(agent, "weather in Paris?")
 
     # THEN the dict is fed back as its JSON dump
     tool_messages = [m for m in result.messages if isinstance(m, ToolMessage)]
@@ -172,7 +169,7 @@ async def test_runner_raises_max_iterations_when_tools_never_settle() -> None:
     # WHEN the runner is invoked
     # THEN it gives up after `max_iter` iterations
     with pytest.raises(MaxIterationsExceeded):
-        await Runner.run(_agent(provider, max_iter=3), "go")
+        await Runner(provider=provider).run(_agent(max_iter=3), "go")
 
 
 async def test_runner_feeds_error_result_for_unknown_tool() -> None:
@@ -187,7 +184,7 @@ async def test_runner_feeds_error_result_for_unknown_tool() -> None:
     )
 
     # WHEN the runner is invoked
-    result = await Runner.run(_agent(provider), "go")
+    result = await Runner(provider=provider).run(_agent(), "go")
 
     # THEN the run completes and the unknown call was reported back as an error
     tool_messages = [m for m in result.messages if isinstance(m, ToolMessage)]
@@ -207,7 +204,7 @@ async def test_runner_feeds_error_result_for_invalid_args() -> None:
     )
 
     # WHEN the runner is invoked
-    result = await Runner.run(_agent(provider), "go")
+    result = await Runner(provider=provider).run(_agent(), "go")
 
     # THEN the validation failure is reported back as an error result
     tool_messages = [m for m in result.messages if isinstance(m, ToolMessage)]
