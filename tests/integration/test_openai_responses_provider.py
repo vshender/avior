@@ -11,6 +11,7 @@ import pytest
 from pydantic import BaseModel
 
 from avior.core import Agent, ModelSettings, Runner
+from avior.core.context import RunContext
 from avior.core.exceptions import MaxTokensExceededError
 from avior.core.messages import AssistantMessage, ToolCallPart
 from avior.core.tools import Tool
@@ -42,7 +43,7 @@ class _MagicNumber(Tool[_MagicNumberArgs, str]):
     def __init__(self) -> None:
         self.calls: list[str] = []
 
-    async def execute(self, args: _MagicNumberArgs) -> str:
+    async def execute(self, ctx: RunContext[object], args: _MagicNumberArgs) -> str:
         self.calls.append(args.city)
         return "4242"
 

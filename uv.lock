@@ -53,6 +53,7 @@ version = "0.0.1.dev0"
 source = { editable = "." }
 dependencies = [
     { name = "pydantic" },
+    { name = "typing-extensions" },
 ]
 
 [package.optional-dependencies]
@@ -84,6 +85,7 @@ requires-dist = [
     { name = "avior", extras = ["anthropic", "openai"], marker = "extra == 'all'" },
     { name = "openai", marker = "extra == 'openai'", specifier = ">=1.50" },
     { name = "pydantic", specifier = ">=2.10" },
+    { name = "typing-extensions", specifier = ">=4.12" },
 ]
 provides-extras = ["anthropic", "openai", "all"]
 

@@ -4,6 +4,7 @@ import pytest
 from pydantic import BaseModel
 
 from avior.core.agent import Agent
+from avior.core.context import RunContext
 from avior.core.exceptions import ConfigurationError
 from avior.core.provider import ModelSettings
 from avior.core.tools import Tool
@@ -20,7 +21,7 @@ class _Ping(Tool[_NoArgs, str]):
     description = "First tool."
     args_model = _NoArgs
 
-    async def execute(self, args: _NoArgs) -> str:
+    async def execute(self, ctx: RunContext[object], args: _NoArgs) -> str:
         return "ping"
 
 
@@ -31,7 +32,7 @@ class _Pong(Tool[_NoArgs, str]):
     description = "Second tool sharing the name."
     args_model = _NoArgs
 
-    async def execute(self, args: _NoArgs) -> str:
+    async def execute(self, ctx: RunContext[object], args: _NoArgs) -> str:
         return "pong"
 
 

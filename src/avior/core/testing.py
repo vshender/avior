@@ -59,7 +59,7 @@ class StubCall(NamedTuple):
 
     messages: Sequence[Message]
     settings: ModelSettings
-    tools: Sequence[Tool[Any, Any]] = ()
+    tools: Sequence[Tool[Any, Any, Any]] = ()
 
 
 def _normalize_response(response: StubResponse) -> ProviderResponse:
@@ -226,7 +226,7 @@ class StubProvider(Provider):
         self,
         messages: Sequence[Message],
         settings: ModelSettings,
-        tools: Sequence[Tool[Any, Any]] = (),
+        tools: Sequence[Tool[Any, Any, Any]] = (),
     ) -> ProviderResponse:
         """Record the call, dispatch, and return the scripted response.
 

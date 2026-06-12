@@ -1,12 +1,15 @@
 """Tests for `Runner`'s tool-dispatch loop."""
 
 import json
+from dataclasses import dataclass
+from typing import Protocol
 
 import pytest
 from pydantic import BaseModel
 
 from avior.core.agent import Agent
-from avior.core.exceptions import MaxIterationsExceeded
+from avior.core.context import RunContext
+from avior.core.exceptions import MaxIterationsExceeded, MissingDependenciesError
 from avior.core.messages import (
     AssistantMessage,
     ToolCallPart,
@@ -31,7 +34,7 @@ class _Echo(Tool[_EchoArgs, str]):
     description = "Echo the value back."
     args_model = _EchoArgs
 
-    async def execute(self, args: _EchoArgs) -> str:
+    async def execute(self, ctx: RunContext[object], args: _EchoArgs) -> str:
         return f"echo:{args.value}"
 
 
@@ -97,7 +100,7 @@ async def test_runner_serializes_base_model_tool_result_as_json() -> None:
         description = "Return structured weather."
         args_model = _EchoArgs
 
-        async def execute(self, args: _EchoArgs) -> _Weather:
+        async def execute(self, ctx: RunContext[object], args: _EchoArgs) -> _Weather:
             return _Weather(city=args.value, temp_c=21)
 
     # GIVEN an agent whose tool returns a `BaseModel`, then a final reply
@@ -130,7 +133,11 @@ async def test_runner_serializes_other_tool_result_as_json_dump() -> None:
         description = "Return weather as a dict."
         args_model = _EchoArgs
 
-        async def execute(self, args: _EchoArgs) -> dict[str, object]:
+        async def execute(
+            self,
+            ctx: RunContext[object],
+            args: _EchoArgs,
+        ) -> dict[str, object]:
             return {"city": args.value, "temp_c": 21}
 
     # GIVEN an agent whose tool returns a plain dict, then a final reply
@@ -211,3 +218,160 @@ async def test_runner_feeds_error_result_for_invalid_args() -> None:
     result_part = tool_messages[0].parts[0].result
     assert isinstance(result_part, ToolResultError)
     assert result_part.content.startswith("Invalid arguments: ")
+
+
+@dataclass
+class _Deps:
+    """Toy dependency object threaded into a tool through its context."""
+
+    token: str
+
+
+class _Capture(Tool[_EchoArgs, str, _Deps]):
+    """Records the `RunContext` it is given so a test can inspect it."""
+
+    name = "capture"
+    description = "Capture the run context."
+    args_model = _EchoArgs
+
+    def __init__(self) -> None:
+        self.seen: RunContext[_Deps] | None = None
+
+    async def execute(self, ctx: RunContext[_Deps], args: _EchoArgs) -> str:
+        self.seen = ctx
+        return f"token={ctx.deps.token}"
+
+
+async def test_runner_threads_deps_and_call_identity_into_tool_ctx() -> None:
+    """A tool's `RunContext` carries `deps` and the call's identity."""
+
+    # GIVEN a deps-typed agent whose tool records the context it receives
+    provider = StubProvider.from_responses(
+        [
+            _tool_call("call-7", "capture", {"value": "x"}),
+            "done",
+        ]
+    )
+    deps = _Deps(token="secret")
+    tool = _Capture()
+    agent = Agent(
+        instructions="be helpful",
+        model_settings=ModelSettings(model="test-model"),
+        tools=[tool],
+        deps_type=_Deps,
+    )
+
+    # WHEN the runner is invoked with that deps value
+    await Runner(provider=provider).run(agent, "go", deps=deps)
+
+    # THEN the tool saw the same deps object and this call's identity
+    assert tool.seen is not None
+    assert tool.seen.deps is deps
+    assert tool.seen.tool_name == "capture"
+    assert tool.seen.tool_call_id == "call-7"
+    assert tool.seen.run_step == 1
+
+
+async def test_runner_requires_deps_when_agent_declares_deps_type() -> None:
+    """A deps-typed agent run without `deps` raises before any model call."""
+
+    # GIVEN a deps-typed agent
+    provider = StubProvider.from_responses(["unused"])
+    agent = Agent(
+        instructions="be helpful",
+        model_settings=ModelSettings(model="test-model"),
+        tools=[_Capture()],
+        deps_type=_Deps,
+    )
+
+    # WHEN `run` is invoked without `deps` (a type error, exercised at runtime)
+    # THEN it raises before the provider is ever called
+    with pytest.raises(MissingDependenciesError, match="deps"):
+        await Runner(provider=provider).run(agent, "go")  # type: ignore[arg-type]  # pyright: ignore[reportArgumentType]
+    assert provider.calls == []
+
+
+async def test_runner_guard_follows_deps_type_under_wider_annotation() -> None:
+    """A concrete `deps_type` arms the guard even under a wider `Agent[object]`.
+
+    `type[...]` is covariant, so `Agent[object](deps_type=...)` type-checks and
+    the run below is statically allowed; the runtime guard still follows the
+    concrete `deps_type` and raises.
+    """
+
+    # GIVEN an `Agent[object]` that nonetheless carries a concrete `deps_type`
+    provider = StubProvider.from_responses(["unused"])
+    agent = Agent[object](
+        instructions="be helpful",
+        model_settings=ModelSettings(model="test-model"),
+        deps_type=_Deps,
+    )
+
+    # WHEN run without `deps` (statically allowed for `Agent[object]`)
+    # THEN the runtime guard still fires
+    with pytest.raises(MissingDependenciesError, match="deps"):
+        await Runner(provider=provider).run(agent, "go")
+    assert provider.calls == []
+
+
+async def test_runner_allows_omitting_deps_for_object_deps_type() -> None:
+    """`deps_type=object` needs no `deps`: runtime agrees with the overloads."""
+
+    # GIVEN an agent that declares `deps_type=object` (deps-agnostic)
+    provider = StubProvider.from_responses(["done"])
+    agent = Agent(
+        instructions="be helpful",
+        model_settings=ModelSettings(model="test-model"),
+        deps_type=object,
+    )
+
+    # WHEN `run` is invoked without `deps` (the overloads accept this)
+    result = await Runner(provider=provider).run(agent, "go")
+
+    # THEN it runs instead of raising (no static/runtime contract mismatch)
+    assert result.output == "done"
+
+
+class _Nullable(Protocol):
+    """An empty protocol; `None` satisfies it structurally."""
+
+
+class _NeedsNullable(Tool[_EchoArgs, str, _Nullable]):
+    """A tool whose deps type accepts `None`; echoes the deps it gets."""
+
+    name = "needs_nullable"
+    description = "Echo the received deps."
+    args_model = _EchoArgs
+
+    async def execute(self, ctx: RunContext[_Nullable], args: _EchoArgs) -> str:
+        return f"deps={ctx.deps}"
+
+
+async def test_runner_accepts_explicit_none_deps_for_nullable_type() -> None:
+    """A real `deps=None` is honored for a deps type that accepts it.
+
+    `None` satisfies an empty `Protocol`, so the call type-checks; the runtime
+    guard must not mistake the passed `None` for an omitted argument and raise.
+    """
+
+    # GIVEN a deps-typed agent whose declared deps type is satisfied by `None`
+    provider = StubProvider.from_responses(
+        [
+            _tool_call("c1", "needs_nullable", {"value": "x"}),
+            "done",
+        ]
+    )
+    agent = Agent(
+        instructions="be helpful",
+        model_settings=ModelSettings(model="test-model"),
+        tools=[_NeedsNullable()],
+        deps_type=_Nullable,
+    )
+
+    # WHEN `run` is invoked with an explicit `deps=None` (a valid value here)
+    result = await Runner(provider=provider).run(agent, "go", deps=None)
+
+    # THEN it does not raise; the run completes and the tool received `None`
+    assert result.output == "done"
+    tool_messages = [m for m in result.messages if isinstance(m, ToolMessage)]
+    assert tool_messages[0].parts[0].result == ToolResultOk(content="deps=None")

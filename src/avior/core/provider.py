@@ -99,7 +99,7 @@ class Provider(ABC):
         self,
         messages: Sequence[Message],
         settings: ModelSettings,
-        tools: Sequence[Tool[Any, Any]] = (),
+        tools: Sequence[Tool[Any, Any, Any]] = (),
     ) -> ProviderResponse:
         """Send `messages` to the model and return its response.
 

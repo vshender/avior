@@ -1,22 +1,58 @@
-"""Exception types raised by `avior.core` and its subpackages.
+"""Exception types `avior` defines.
 
-Three categories sit under a common `AviorError` root:
+Every exception avior *defines* descends from `AviorError` - so `except
+AviorError` scopes to avior's own errors.  It is not a catch-everything: avior
+can still surface exceptions it does not define - e.g. a Pydantic
+`ValidationError` from a bad `ModelSettings`, or an `ImportError` for a missing
+optional provider.  Below the root, two branches split avior's own errors by
+how a caller should respond:
 
-- `ProviderError` and subclasses cover transport / SDK failures - the provider
-  could not fulfill its contract (HTTP error, network failure, schema mismatch).
-- `AgentRunError` and subclasses cover failures during an agent run other
-  than transport-level provider failures.
-- `ConfigurationError` covers invalid configuration detected when avior objects
-  are constructed - a programmer error to fix in code, not a runtime condition
-  to catch and handle.
+- `AviorOperationalError` - a run or a provider call failed: an external
+  condition or an outcome of the run.  A caller may catch and handle these
+  (retry, raise a limit, fall back, surface to the user).  Two kinds:
+
+  - `ProviderError` and subclasses - transport / SDK failures: the provider
+    could not fulfill its contract (HTTP error, network failure, schema
+    mismatch).
+  - `AgentRunError` and subclasses - failures during a run other than provider
+    failures (the loop never reached a final answer, the model refused, output
+    was filtered).
+
+- `AviorUsageError` - avior was used incorrectly: a bug to fix in code, not a
+  condition to catch and handle.  Includes:
+
+  - `ConfigurationError` - invalid setup of an avior object, found at
+    construction (for example, two tools sharing a name).
+  - `MissingDependenciesError` - a deps-typed agent was run without its `deps`.
+
+For handling logic, catch a specific operational type, not the bare root.
 """
 
 
 class AviorError(Exception):
-    """Common root for every exception raised by avior."""
+    """Common root for every exception avior defines.
+
+    It has two branches: `AviorOperationalError` (conditions a caller may
+    handle) and `AviorUsageError` (bugs to fix in code).  Catching `AviorError`
+    is not enough to handle every failure - avior also surfaces exceptions it
+    does not define, such as a Pydantic `ValidationError`, which a caller may
+    need to catch too.
+    """
 
 
-class ProviderError(AviorError):
+class AviorOperationalError(AviorError):
+    """Base class for operational failures during avior's work.
+
+    Running an agent or calling the provider failed - an external condition
+    (the provider was down) or an outcome of the run (the loop never reached a
+    final answer, the model refused, the token budget was too small).  These
+    surface at runtime, and a caller may catch and handle them (retry, raise a
+    limit, fall back, surface to the user) - unlike `AviorUsageError`, which
+    signals a bug to fix in code.
+    """
+
+
+class ProviderError(AviorOperationalError):
     """Base class for all `Provider` failures.
 
     `Provider` implementations translate vendor-specific SDK exceptions into
@@ -64,7 +100,7 @@ class ProviderResponseValidationError(ProviderError):
     """
 
 
-class AgentRunError(AviorError):
+class AgentRunError(AviorOperationalError):
     """Base class for failures during an agent run."""
 
 
@@ -131,12 +167,27 @@ class ModelRefusalError(AgentRunError):
         self.refusal_text = refusal_text
 
 
-class ConfigurationError(AviorError):
-    """Invalid configuration detected when an avior object is constructed.
+class AviorUsageError(AviorError):
+    """Base class for using avior incorrectly.
 
-    Covers programmer errors caught at construction time - for example, an
-    `Agent` given two tools that share a name.  Unlike `ProviderError` and
-    `AgentRunError`, which are runtime conditions a caller may catch and handle,
-    a configuration error signals a bug in how avior is set up: fix it in code
-    rather than handling it at runtime.
+    Signals a bug in how avior is set up or called - a programmer error to fix
+    in code, not a runtime condition to catch and handle.  Descends from
+    `AviorError` so a boundary net still sees it, but handling logic should not
+    catch it: fix the code.
+    """
+
+
+class ConfigurationError(AviorUsageError):
+    """Invalid configuration of an avior object, detected at construction.
+
+    For example, an `Agent` given two tools that share a name.
+    """
+
+
+class MissingDependenciesError(AviorUsageError):
+    """A deps-typed agent was run without the `deps` it declared.
+
+    `Runner.run` raises this before any model call when the agent declares a
+    concrete `deps_type` but no `deps` argument is supplied.  Pass `deps`, or
+    drop `deps_type` if the agent needs none; see `Agent.deps_type`.
     """

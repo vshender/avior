@@ -10,6 +10,7 @@ authors = [
 ]
 dependencies = [
     "pydantic>=2.10",
+    "typing-extensions>=4.12",
 ]
 
 [project.optional-dependencies]
@@ -54,6 +55,20 @@ max-doc-length = 80
 include = ["src", "tests"]
 pythonVersion = "3.12"
 typeCheckingMode = "strict"
+# basedpyright honors `# type: ignore` by default, the same as mypy.  Turning
+# that off is a deliberate split: each checker owns its suppressions - mypy
+# keeps reading `# type: ignore[code]`, basedpyright reads only
+# `# pyright: ignore[rule]`.  The two disagree on which lines need a suppression
+# (e.g. pydantic's `@computed_field` trips mypy but not basedpyright), so
+# without the split a mypy-only `# type: ignore` would read as "unnecessary" to
+# basedpyright and fail the rule below.
+enableTypeIgnoreComments = false
+# Flag a `# pyright: ignore` that no longer suppresses anything.  This makes the
+# negative deps-compatibility fixtures in `tests/typing` self-checking: if a
+# regression widened the types so an incompatible tool/agent pair stopped being
+# rejected, the now-unnecessary suppression fails the build.  (mypy gets the
+# same guard from `strict`'s `warn_unused_ignores`.)
+reportUnnecessaryTypeIgnoreComment = "error"
 
 [tool.mypy]
 files = ["src", "tests"]

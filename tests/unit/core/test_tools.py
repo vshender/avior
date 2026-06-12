@@ -2,6 +2,7 @@
 
 from pydantic import BaseModel
 
+from avior.core.context import RunContext
 from avior.core.tools import Tool
 
 
@@ -17,7 +18,7 @@ class _Add(Tool[_AddArgs, int]):
     description = "Add two integers."
     args_model = _AddArgs
 
-    async def execute(self, args: _AddArgs) -> int:
+    async def execute(self, ctx: RunContext[object], args: _AddArgs) -> int:
         return args.a + args.b
 
 
@@ -29,7 +30,8 @@ async def test_tool_coerces_args_via_args_model_then_executes() -> None:
 
     # WHEN raw arguments (a string among them) are validated and the tool runs
     args = tool.args_model.model_validate({"a": "2", "b": 3})
-    result = await tool.execute(args)
+    ctx = RunContext[object](deps=None, tool_name="add", tool_call_id="c1", run_step=1)
+    result = await tool.execute(ctx, args)
 
     # THEN the string was coerced to an int and the tool returned their sum
     assert result == 5

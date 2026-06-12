@@ -15,7 +15,7 @@ import asyncio
 
 from pydantic import BaseModel
 
-from avior.core import Agent, ModelSettings, Runner, Tool
+from avior.core import Agent, ModelSettings, RunContext, Runner, Tool
 from avior.providers.anthropic import AnthropicProvider
 
 
@@ -32,7 +32,11 @@ class GetWeather(Tool[WeatherArgs, str]):
     description = "Get the current weather for a city."
     args_model = WeatherArgs
 
-    async def execute(self, args: WeatherArgs) -> str:
+    # This tool reads no dependencies, so its context is `RunContext[object]`.
+    # `object` means "requires nothing", so the tool fits any agent whatever
+    # its deps are.  It matches the third parameter of `Tool[WeatherArgs, str]`,
+    # which is omitted here and so defaults to `object`.
+    async def execute(self, ctx: RunContext[object], args: WeatherArgs) -> str:
         return f"It is 22 degrees Celsius and sunny in {args.city}."
 
 

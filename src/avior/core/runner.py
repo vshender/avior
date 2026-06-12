@@ -2,15 +2,18 @@
 
 import json
 from collections.abc import Mapping, Sequence
-from typing import Any, assert_never
+from typing import Any, assert_never, overload
 
 from pydantic import BaseModel, ValidationError
+from typing_extensions import TypeVar
 
 from avior.core.agent import Agent
+from avior.core.context import RunContext
 from avior.core.exceptions import (
     ContentFilterError,
     MaxIterationsExceeded,
     MaxTokensExceededError,
+    MissingDependenciesError,
     ModelRefusalError,
 )
 from avior.core.messages import (
@@ -28,6 +31,16 @@ from avior.core.provider import ModelSettings, Provider
 from avior.core.result import RunResult
 from avior.core.tools import Tool
 from avior.core.usage import Usage
+
+# Binds the agent's deps type to the `deps` argument of `run`.  Explicit
+# `TypeVar` (Python 3.12 has no `def run[Deps = None]` default syntax); a
+# function-scoped type parameter, so variance does not apply.
+Deps = TypeVar("Deps", default=None)
+
+# Sentinel for an omitted `deps` argument, kept distinct from a real `deps=None`
+# value: some declared deps types accept `None` (an empty `Protocol`, or `None`
+# itself), so a passed `deps=None` is valid and must not read as "not passed".
+_MISSING: Any = object()
 
 
 class Runner:
@@ -53,11 +66,40 @@ class Runner:
 
         self.provider = provider
 
+    # `deps` is optional for an agent that declares no dependencies, i.e. when
+    # `Deps` is:
+    #
+    # - `None` - no `deps_type` and no tools to infer from;
+    # - `object` - no `deps_type`, but tools that need no dependencies make
+    #   the checker infer `Deps` as `object`.
+    @overload
     async def run(
         self,
-        agent: Agent,
+        agent: Agent[None] | Agent[object],
         input: str | Sequence[Message],
         *,
+        max_iter: int | None = None,
+    ) -> RunResult: ...
+
+    # `deps` is required once the agent's `Deps` is concrete (set via
+    # `deps_type` or inferred from the tools), so this overload has no default
+    # for it.
+    @overload
+    async def run(
+        self,
+        agent: Agent[Deps],
+        input: str | Sequence[Message],
+        *,
+        deps: Deps,
+        max_iter: int | None = None,
+    ) -> RunResult: ...
+
+    async def run(
+        self,
+        agent: Agent[Any],
+        input: str | Sequence[Message],
+        *,
+        deps: Any = _MISSING,
         max_iter: int | None = None,
     ) -> RunResult:
         """Run `agent` on `input` and return the run result.
@@ -80,6 +122,20 @@ class Runner:
                 adapters then collect all `SystemMessage`s from that list.  For
                 example, an adapter may move their text into a provider-level
                 `instructions` or `system` field.
+            deps: The dependencies passed to the agent's tools through their
+                `RunContext`, of the agent's declared `Deps` type.  Required
+                when `Deps` is a concrete type (set on the agent via
+                `deps_type`, or inferred from its tools); may be omitted when
+                `Deps` is `None` or `object`.
+
+                In addition to that type-level requirement, a runtime check
+                guards untyped callers: if the agent sets `deps_type` and `deps`
+                is missing, the run stops at once with a clear error before any
+                model call (see Raises), rather than letting a tool fail later
+                on `deps=None`.  The check is presence-only - it does not verify
+                `deps` matches the declared type (the type checker's job) - and
+                a `Deps` inferred without `deps_type` is not covered (see
+                `Agent.deps_type`).
             max_iter: Maximum loop iterations; defaults to `agent.max_iter`.
 
         Returns:
@@ -87,11 +143,45 @@ class Runner:
             transcript, and the run's token usage.
 
         Raises:
+            MissingDependenciesError: `deps_type` is set but `deps` is missing.
             ContentFilterError: An external content filter blocked the response.
             MaxTokensExceededError: Output was truncated by the token budget.
             ModelRefusalError: The model itself declined to answer.
             MaxIterationsExceeded: The loop hit `max_iter` without finishing.
         """
+
+        # `deps` is required only for a concrete dependency type.  `None`/
+        # `NoneType` (no deps) and `object` (deps-agnostic) need no value, and
+        # the overloads treat `Agent[None]` / `Agent[object]` as deps-optional -
+        # so the guard must skip them too, or it would reject a call the type
+        # checker accepted.
+        #
+        # It checks only that `deps` is present, never that it matches
+        # `deps_type`: a runtime `isinstance` check would force every protocol
+        # deps type to be `@runtime_checkable`, and even then verify only
+        # attribute presence, not the structural type the checker enforces.
+        #
+        # "Present" is tracked by the `_MISSING` sentinel, not `deps is None`:
+        # a real `deps=None` is a valid value for a deps type that accepts it.
+        deps_type = agent.deps_type
+        if (
+            deps_type is not None
+            and deps_type is not object
+            and deps_type is not type(None)
+            and deps is _MISSING
+        ):
+            # Statically `deps_type` is a class, so it has `__name__`.  But a
+            # caller bypassing the type checker could pass a runtime value that
+            # isn't a plain class - a union like `int | str` has no `__name__` -
+            # so read the name defensively: the error message must not itself
+            # raise an `AttributeError`.
+            deps_name = getattr(deps_type, "__name__", str(deps_type))
+            raise MissingDependenciesError(
+                f"Agent declares deps_type={deps_name!r}, so "
+                "`Runner.run` requires a `deps` argument."
+            )
+        if deps is _MISSING:
+            deps = None
 
         input_messages: list[Message] = (
             [UserMessage.from_text(input)] if isinstance(input, str) else list(input)
@@ -102,7 +192,7 @@ class Runner:
 
         generated: list[Message] = []
         usages: list[Usage] = []
-        for _ in range(max_iter):
+        for run_step in range(1, max_iter + 1):
             messages: list[Message] = [system, *input_messages, *generated]
             response = await self.provider.complete(
                 messages, agent.model_settings, agent.tools
@@ -124,7 +214,10 @@ class Runner:
                     usage=Usage.sum(usages) if usages else None,
                 )
 
-            results = [await _run_tool(tools_by_name, call) for call in tool_calls]
+            results = [
+                await _run_tool(tools_by_name, call, deps, run_step)
+                for call in tool_calls
+            ]
             generated.append(ToolMessage(parts=results))
 
         raise MaxIterationsExceeded(
@@ -169,8 +262,10 @@ def _raise_for_error_stop(message: AssistantMessage, settings: ModelSettings) ->
 
 
 async def _run_tool(
-    tools_by_name: Mapping[str, Tool[Any, Any]],
+    tools_by_name: Mapping[str, Tool[Any, Any, Any]],
     call: ToolCallPart,
+    deps: object,
+    run_step: int,
 ) -> ToolResultPart:
     """Validate, run one tool call, and wrap the outcome as a `ToolResultPart`.
 
@@ -187,8 +282,14 @@ async def _run_tool(
     except ValidationError as exc:
         return _error_result(call, f"Invalid arguments: {exc}")
 
+    ctx = RunContext[Any](
+        deps=deps,
+        tool_name=call.tool_name,
+        tool_call_id=call.call_id,
+        run_step=run_step,
+    )
     try:
-        result = await tool.execute(args)
+        result = await tool.execute(ctx, args)
     except Exception as exc:  # noqa: BLE001  (tool failures are reported to the model, not raised)
         return _error_result(call, f"Tool raised an error: {exc}")
 

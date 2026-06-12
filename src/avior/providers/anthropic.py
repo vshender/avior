@@ -96,7 +96,7 @@ class AnthropicProvider(Provider):
         self,
         messages: Sequence[Message],
         settings: ModelSettings,
-        tools: Sequence[Tool[Any, Any]] = (),
+        tools: Sequence[Tool[Any, Any, Any]] = (),
     ) -> ProviderResponse:
         """Send `messages` to Claude and return the assistant's response.
 
@@ -254,7 +254,7 @@ class AnthropicProvider(Provider):
             await self._client.close()
 
     @staticmethod
-    def _to_tool_param(tool: Tool[Any, Any]) -> ToolParam:
+    def _to_tool_param(tool: Tool[Any, Any, Any]) -> ToolParam:
         """Convert an avior `Tool` to an Anthropic tool definition."""
 
         return ToolParam(

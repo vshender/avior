@@ -5,6 +5,7 @@ from collections.abc import Sequence
 import pytest
 from pydantic import BaseModel
 
+from avior.core.context import RunContext
 from avior.core.messages import AssistantMessage, Message, TextPart, UserMessage
 from avior.core.provider import ModelSettings, ProviderResponse
 from avior.core.testing import StubCall, StubProvider
@@ -140,7 +141,7 @@ async def test_stub_provider_records_offered_tools() -> None:
         description = "Ping."
         args_model = _NoArgs
 
-        async def execute(self, args: _NoArgs) -> str:
+        async def execute(self, ctx: RunContext[object], args: _NoArgs) -> str:
             return "pong"
 
     # GIVEN a stub and a tool to offer

@@ -102,7 +102,7 @@ class OpenAIResponsesProvider(Provider):
         self,
         messages: Sequence[Message],
         settings: ModelSettings,
-        tools: Sequence[Tool[Any, Any]] = (),
+        tools: Sequence[Tool[Any, Any, Any]] = (),
     ) -> ProviderResponse:
         """Send `messages` to OpenAI Responses API and return the assistant's
         response.
@@ -338,7 +338,7 @@ class OpenAIResponsesProvider(Provider):
             await self._client.close()
 
     @staticmethod
-    def _to_tool_param(tool: Tool[Any, Any]) -> FunctionToolParam:
+    def _to_tool_param(tool: Tool[Any, Any, Any]) -> FunctionToolParam:
         """Convert an avior `Tool` to a Responses function-tool definition.
 
         The tool's `args_model` JSON schema is sent as-is with `strict=False`:

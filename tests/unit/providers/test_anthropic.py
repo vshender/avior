@@ -18,6 +18,7 @@ from anthropic.types import Message as AnthropicMessage
 from anthropic.types import TextBlock, ToolUseBlock, Usage
 from pydantic import BaseModel
 
+from avior.core.context import RunContext
 from avior.core.exceptions import (
     ProviderConnectionError,
     ProviderError,
@@ -98,7 +99,7 @@ class _Weather(Tool[_CityArgs, str]):
     description = "Look up the weather for a city."
     args_model = _CityArgs
 
-    async def execute(self, args: _CityArgs) -> str:
+    async def execute(self, ctx: RunContext[object], args: _CityArgs) -> str:
         return "sunny"
 
 

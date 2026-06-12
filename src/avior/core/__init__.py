@@ -9,6 +9,7 @@ directly (e.g., `from avior.core.messages import StopReason`).
 
 from avior.core import _logging as _logging  # noqa: F401  (logging side effect)
 from avior.core.agent import Agent
+from avior.core.context import RunContext
 from avior.core.messages import (
     AssistantMessage,
     Message,
@@ -38,6 +39,7 @@ __all__ = [
     "Part",
     "Provider",
     "ProviderResponse",
+    "RunContext",
     "RunResult",
     "Runner",
     "StopReason",
