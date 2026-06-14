@@ -7,15 +7,36 @@ The LLM is shown the tool's name, description, and the JSON schema of its
 arguments model.  When the LLM asks to call the tool, the arguments it sends are
 validated and coerced through that same model before `execute` runs - so
 `execute` always receives a typed, validated arguments object, never a raw dict.
+
+`Tool` is the low-level primitive: you set `name`, `description`, and
+`args_model`, and implement `execute`.  `@tool` is the sugar over it - it takes
+an ordinary typed function and derives those same pieces from its signature.  A
+function-defined tool fits an agent exactly as a hand-written `Tool` subclass
+does.
 """
 
+import inspect
 from abc import ABC, abstractmethod
-from typing import Generic
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from types import SimpleNamespace
+from typing import (
+    Annotated,
+    Any,
+    Concatenate,
+    Generic,
+    cast,
+    get_args,
+    get_origin,
+    get_type_hints,
+    overload,
+)
 
-from pydantic import BaseModel
+from pydantic import BaseModel, create_model
 from typing_extensions import TypeVar
 
 from avior.core.context import RunContext
+from avior.core.exceptions import ConfigurationError
 
 # `Tool` is *invariant* in `Args`: the parameter appears both covariantly
 # (`args_model: type[Args]`) and contravariantly (`execute`'s `args`
@@ -92,3 +113,303 @@ class Tool(ABC, Generic[Args, Result, Deps]):
         identity of this tool call.  `args` is the validated, coerced arguments
         object - an instance of `args_model`, never a raw dict.
         """
+
+
+# `FunctionTool` and `tool` use native (PEP 695) type parameters.  Spelling type
+# variables out explicitly is only necessary when native 3.12 syntax cannot
+# express what a generic needs - two cases:
+#
+# - a variance inference would get wrong: `RunContext` needs `Deps` covariant,
+#   but its frozen `deps` field reads as assignable, so inference makes it
+#   invariant;
+# - a PEP-696 default (e.g. `Deps` defaulting to `object`); native default
+#   syntax is 3.13+, and the package targets 3.12.
+#
+# `FunctionTool` hits neither: no field of it stores `Result` or `Deps`, so
+# nothing forces them invariant.  Inference is correct - `Result` covariant from
+# `execute`'s return, `Deps` contravariant from its `RunContext[Deps]` parameter
+# - and no default is wanted.  Its `Result`/`Deps` parameters shadow the
+# module-level type variables of the same name - a benign shadow, since both
+# name the same concepts (a tool's result and deps types).
+
+
+@dataclass(frozen=True)
+class FunctionTool[Result, Deps](Tool[Any, Result, Deps]):
+    """A `Tool` whose behavior is a Python function, produced by `@tool`.
+
+    It is a frozen dataclass, not a Pydantic model: it holds a live function
+    (`func`), and Pydantic models are for serializable data.
+
+    `FunctionTool` is generic over `Result` and `Deps`, but not over the
+    arguments model.  Where a hand-written `Tool` subclass names a concrete
+    `args_model` - so `Args` has a name, `Tool[WeatherArgs, ...]` - `@tool`
+    synthesizes the model from the signature at runtime (via `create_model`), so
+    that model has no statically nameable type, only `type[BaseModel]`.
+    `Result` survives because the return annotation names it; the synthesized
+    model does not, so `Args` drops to `Any`.
+
+    Dropping it costs nothing the dispatch relied on.  The runner validates the
+    LLM's raw arguments through `args_model` before `execute` either way, so the
+    real model instance is re-established at runtime.  The static `Args` only
+    ever helped a direct typed call, and there is no named type here to make one
+    against.  `Deps` is preserved - it is what fits the tool to an agent's deps.
+    """
+
+    name: str
+    """The tool's name, as exposed to the LLM."""
+
+    description: str
+    """A natural-language description of what the tool does, for the LLM."""
+
+    args_model: type[BaseModel]
+    """The Pydantic model generated from the function's parameters."""
+
+    func: Callable[..., object]
+    """The wrapped function.  May be sync or async."""
+
+    takes_ctx: bool
+    """Whether `func` takes the `RunContext` first, to be injected at call."""
+
+    positional_params: tuple[str, ...]
+    """`func`'s positional-only parameters, in order (passed positionally)."""
+
+    async def execute(self, ctx: RunContext[Deps], args: BaseModel) -> Result:
+        """Call the wrapped function with the validated arguments.
+
+        The runner has already validated and coerced the LLM's raw arguments
+        through `args_model`, so `args` is a typed model instance.
+        Positional-only parameters are passed positionally and the rest by
+        keyword; the context is prepended only if the function declared it.
+        A sync function runs inline; an async one is awaited.
+        """
+
+        fields = {name: getattr(args, name) for name in type(args).model_fields}
+        positional = [fields.pop(name) for name in self.positional_params]
+
+        if self.takes_ctx:
+            out = self.func(ctx, *positional, **fields)
+        else:
+            out = self.func(*positional, **fields)
+
+        if inspect.isawaitable(out):
+            out = await cast(Awaitable[object], out)
+
+        return cast(Result, out)
+
+
+# The four overloads are tried top to bottom, so their order is load-bearing.
+# Context-first: a `RunContext[Deps]` first parameter binds `Deps` and matches
+# before the context-free forms would.  Async-first: an async function binds
+# `Result` to its awaited type (the `X` in `Awaitable[X]`), not to the whole
+# `Awaitable[X]` - which is what the bare-value form would bind it to.
+
+
+# Reads the run context, async: `Deps` from `ctx`, `Result` from the await.
+@overload
+def tool[Result, Deps, **P](
+    func: Callable[Concatenate[RunContext[Deps], P], Awaitable[Result]],
+) -> FunctionTool[Result, Deps]: ...
+
+
+# Reads the run context, sync.
+@overload
+def tool[Result, Deps, **P](
+    func: Callable[Concatenate[RunContext[Deps], P], Result],
+) -> FunctionTool[Result, Deps]: ...
+
+
+# No run context, async: nothing constrains `Deps`, so it is `object`.
+@overload
+def tool[Result, **P](
+    func: Callable[P, Awaitable[Result]],
+) -> FunctionTool[Result, object]: ...
+
+
+# No run context, sync.
+@overload
+def tool[Result, **P](
+    func: Callable[P, Result],
+) -> FunctionTool[Result, object]: ...
+
+
+def tool(func: Callable[..., object]) -> FunctionTool[Any, Any]:
+    """Turn a typed function into a `FunctionTool`.
+
+    Use it bare (`@tool`) above a `def` or `async def`, or call it directly
+    (`tool(func)`).  The function's name, docstring, and parameters become the
+    tool's name, description, and arguments model.  An optional first parameter
+    annotated `RunContext[Deps]` is recognized as the run context and kept out
+    of the arguments model.
+
+    For a method, pass a bound one - `tool(instance.method)` - whose signature
+    has already dropped `self`.  Applying `@tool` to a method in a class body
+    wraps the unbound function and is rejected, since `self` is unbound there.
+    """
+
+    args_model, takes_ctx, positional_params = _build_args_model(func)
+    return FunctionTool(
+        name=func.__name__,
+        description=inspect.getdoc(func) or "",
+        args_model=args_model,
+        func=func,
+        takes_ctx=takes_ctx,
+        positional_params=positional_params,
+    )
+
+
+def _build_args_model(
+    func: Callable[..., object],
+) -> tuple[type[BaseModel], bool, tuple[str, ...]]:
+    """Derive a tool's arguments model from a function signature.
+
+    Returns the generated model, whether the function takes the run context as
+    its first parameter, and the names of its positional-only parameters (in
+    order, to pass them positionally).  `Annotated[T, Field(...)]`
+    metadata (such as a parameter description) is carried onto the model field.
+    A parameter with no annotation is typed `Any`; one with a default keeps it,
+    so the field is not required.
+
+    Raises `ConfigurationError` for a signature that does not map to a tool: a
+    `self`/`cls` first parameter (an unbound method), a `RunContext` parameter
+    that is not first or is keyword-only, `*args` / `**kwargs`, an argument name
+    starting with `_`, or a `model_`-prefixed name that shadows a `BaseModel`
+    attribute (Pydantic's reserved namespace).  The context parameter is matched
+    by type, so its own name may start with `_`.
+
+    Other Pydantic model-build errors (an invalid `Field`, an unsupported type)
+    are left to propagate as themselves, not reinterpreted as a name conflict.
+    """
+
+    if not (inspect.isfunction(func) or inspect.ismethod(func)):
+        raise ConfigurationError(
+            f"@tool expects a function or method, got a {type(func).__name__!r}; "
+            f"`functools.partial` and callable objects are not supported - wrap "
+            f"the behavior in a `def`."
+        )
+
+    signature = inspect.signature(func)
+    parameters = list(signature.parameters.values())
+
+    # An unbound method applied in a class body still has `self`/`cls` first, so
+    # it would leak into the schema and never be bound.  A bound method's
+    # signature already drops it, so `tool(instance.method)` is unaffected.
+    # Checked before resolving annotations so the message stays precise.
+    if parameters and parameters[0].name in ("self", "cls"):
+        raise ConfigurationError(
+            f"Tool function {func.__name__!r} has {parameters[0].name!r} as its "
+            f"first parameter; @tool does not bind methods.  Use a standalone "
+            f"function, or pass a bound method: `tool(instance.method)`."
+        )
+
+    hints = _resolve_param_hints(func)
+    takes_ctx = bool(parameters) and _is_run_context(hints.get(parameters[0].name))
+    if takes_ctx:
+        # The context is injected positionally (`func(ctx, ...)`), so a
+        # keyword-only context cannot receive it.
+        if parameters[0].kind is inspect.Parameter.KEYWORD_ONLY:
+            raise ConfigurationError(
+                f"Tool function {func.__name__!r} declares its `RunContext` "
+                f"parameter {parameters[0].name!r} as keyword-only; declare it as "
+                f"a normal first parameter (remove the `*` before it)."
+            )
+        parameters = parameters[1:]
+
+    fields: dict[str, Any] = {}
+    positional_params: list[str] = []
+    for parameter in parameters:
+        if parameter.kind in (
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        ):
+            raise ConfigurationError(
+                f"Tool function {func.__name__!r} cannot take *args or **kwargs; "
+                f"declare each argument as its own typed parameter."
+            )
+
+        # Pydantic silently drops leading-underscore names from the model, so
+        # the argument would vanish from the schema and break the call.
+        if parameter.name.startswith("_"):
+            raise ConfigurationError(
+                f"Tool function {func.__name__!r} has parameter {parameter.name!r}: "
+                f"a leading underscore is excluded from the arguments model, so "
+                f"rename it without the underscore."
+            )
+
+        # A `model_`-prefixed name that shadows a `BaseModel` attribute is a
+        # protected-namespace conflict: Pydantic either rejects it outright
+        # (`model_dump`) or lets it shadow a member we rely on (`model_fields`).
+        if parameter.name.startswith("model_") and hasattr(BaseModel, parameter.name):
+            raise ConfigurationError(
+                f"Tool function {func.__name__!r} has parameter {parameter.name!r}, "
+                f"which collides with Pydantic's reserved `model_` namespace "
+                f"(it shadows `BaseModel.{parameter.name}`); rename it."
+            )
+
+        if _is_run_context(hints.get(parameter.name)):
+            raise ConfigurationError(
+                f"Tool function {func.__name__!r} declares RunContext as parameter "
+                f"{parameter.name!r}; it must be the first parameter, if present."
+            )
+
+        # A positional-only parameter is still a model field, but cannot be
+        # passed by keyword, so record it to pass positionally at call time.
+        if parameter.kind is inspect.Parameter.POSITIONAL_ONLY:
+            positional_params.append(parameter.name)
+
+        annotation = hints.get(parameter.name, Any)
+        default = (
+            parameter.default
+            if parameter.default is not inspect.Parameter.empty
+            else ...
+        )
+        fields[parameter.name] = (annotation, default)
+
+    model = create_model(f"{func.__name__}_args", **fields)
+    return model, takes_ctx, tuple(positional_params)
+
+
+def _resolve_param_hints(func: Callable[..., object]) -> dict[str, Any]:
+    """Resolve the annotations of the function's parameters to runtime types.
+
+    Built from `inspect.signature`, so only the effective parameters are
+    resolved: the return type (held separately) and a bound method's already-
+    consumed `self`/`cls` are excluded.  Neither is a tool argument, and either
+    might be unresolvable (a `TYPE_CHECKING`-only type) without that breaking
+    construction.
+
+    `Annotated[T, Field(...)]` metadata on a parameter is preserved, so a
+    `Field(description=...)` reaches the LLM-facing schema.
+    """
+
+    # A shim carrying only the parameter annotations, so the function's own
+    # `__annotations__` is never mutated.
+    signature_parameters = inspect.signature(func).parameters
+    shim = SimpleNamespace()
+    shim.__annotations__ = {
+        name: parameter.annotation
+        for name, parameter in signature_parameters.items()
+        if parameter.annotation is not inspect.Parameter.empty
+    }
+    try:
+        # `include_extras` keeps the `Annotated[...]` wrappers; without it
+        # `get_type_hints` strips them, dropping `Field(...)` on a parameter.
+        return get_type_hints(shim, globalns=func.__globals__, include_extras=True)
+    except (NameError, AttributeError) as exc:
+        raise ConfigurationError(
+            f"Tool function {func.__name__!r} has an annotation that cannot be "
+            f"resolved: {exc}.  The annotated type must be available at runtime: "
+            f"importable at module scope, not only in a local scope or under "
+            f"`if TYPE_CHECKING:`, and spelled correctly."
+        ) from exc
+
+
+def _is_run_context(annotation: object) -> bool:
+    """Tell whether an annotation is `RunContext`, bare or parameterized.
+
+    `Annotated[RunContext[...], ...]` counts: the wrapper is stripped before
+    checking, so context metadata does not hide the type.
+    """
+
+    if get_origin(annotation) is Annotated:
+        annotation = get_args(annotation)[0]
+    return annotation is RunContext or get_origin(annotation) is RunContext

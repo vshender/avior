@@ -1,45 +1,23 @@
 """Type-level checks for tool/agent deps compatibility.
 
-These are verified by the static type checkers in CI (basedpyright and mypy over
-`tests/`).  Nothing here runs: the module holds no pytest tests, and its name is
-outside the `test_*` collection pattern, so it exists purely for the checkers.
-Both checkers infer the same `Agent[...]` type for every construction here but
-one - the `_mixed` case at the end, which exists to document where they diverge.
-Otherwise a single set of fixtures serves both.
-
-The positive cases use `assert_type` to pin the exact type the `Agent`
-constructor produces, per the rule:
+Pins the rule:
 
     `Tool[..., D_tool]` fits `Agent[D_agent]` iff `D_agent` is assignable to
     `D_tool`.
 
-`assert_type` checks more than an annotated assignment would: the construction
-must both be accepted (the tool fits the agent's deps) and infer to *exactly*
-the expected type.  A widening regression - say the deps binding drifted to
-`Any` or `object` - would change the inferred type and fail the assertion, where
-an assignment to a declared target could still pass.  And a regression that lost
-`RunContext` covariance (hence `Tool` contravariance) would make the
-construction stop type-checking outright.
+Positive cases `assert_type` the exact `Agent[...]` the constructor produces; a
+regression that lost `RunContext` covariance (hence `Tool` contravariance) would
+make them stop type-checking.  `_r` instead uses an assignment to check `Result`
+is covariant - a tool producing a subtype fits a slot for the supertype.
 
-One positive case uses an assignment instead of `assert_type`: `_r` checks that
-`Result` is covariant - a tool producing a subtype fits a slot for the
-supertype.
+Most negative cases assert the variance at the `Tool` level (what the rule
+reduces to); one (N4) asserts it at the `Agent` boundary, so a widening of the
+`tools` field type is caught even if the `Tool`-level relation stayed intact.
 
-The negative cases - incompatible combinations that must be *rejected* - are
-locked in the other direction.  Each is an assignment that must NOT type-check,
-carrying a suppression for each checker: `# type: ignore[assignment]` for mypy
-and `# pyright: ignore[reportAssignmentType]` for basedpyright.  Both checkers
-are configured to flag a suppression that no longer suppresses anything (mypy's
-`warn_unused_ignores`, basedpyright's `reportUnnecessaryTypeIgnoreComment`).  So
-if a regression widened the types - say `Tool`'s deps parameter drifted to `Any`
-- the rejected assignment would start type-checking, its now-useless suppression
-would be reported, and CI would fail.
-
-Most negative cases assert the variance directly at the `Tool` level, which is
-exactly what the agent-level rule above reduces to: a tool fits an agent's tool
-list iff the tool's type is assignable to `Tool[..., D_agent]`.  One case (N4)
-asserts it at the `Agent` boundary itself, so a widening of the `tools` field
-type is caught even if the `Tool`-level relation stayed intact.
+`_mixed` documents where the checkers diverge: without `deps_type`, basedpyright
+infers `Agent[_Sub]` across multiple deps-aware tools and accepts it, while mypy
+cannot infer `Deps` across more than one tool and rejects the list - hence its
+mypy-only suppression.
 """
 
 from typing import Protocol, assert_type

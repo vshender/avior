@@ -28,7 +28,7 @@ from avior.core.messages import (
 from avior.core.provider import ModelSettings, Provider, ProviderResponse
 from avior.core.result import RunResult
 from avior.core.runner import Runner
-from avior.core.tools import Tool
+from avior.core.tools import Tool, tool
 from avior.core.usage import Usage
 
 __all__ = [
@@ -54,4 +54,5 @@ __all__ = [
     "ToolResultPart",
     "Usage",
     "UserMessage",
+    "tool",
 ]
