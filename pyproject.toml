@@ -1,17 +1,32 @@
 [project]
 name = "avior"
-version = "0.0.1.dev0"
+version = "0.1.0a1"
 description = "A Python library for building LLM agents."
 readme = "README.md"
 requires-python = ">=3.12"
-license = { text = "ISC" }
+license = "ISC"
+license-files = ["LICENSE"]
 authors = [
     { name = "Vadzim Shender", email = "vadzim@shender.org" },
+]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Typing :: Typed",
 ]
 dependencies = [
     "pydantic>=2.10",
     "typing-extensions>=4.12",
 ]
+
+[project.urls]
+Homepage = "https://github.com/vshender/avior"
+Repository = "https://github.com/vshender/avior"
+Issues = "https://github.com/vshender/avior/issues"
 
 [project.optional-dependencies]
 anthropic = [
@@ -25,8 +40,24 @@ all = [
 ]
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
+
+[tool.hatch.build]
+exclude = [
+    "**/*~",
+    "**/__pycache__",
+]
+
+[tool.hatch.build.targets.sdist]
+only-include = [
+    "src",
+    "tests",
+    "examples",
+    "README.md",
+    "LICENSE",
+    "pyproject.toml",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/avior"]
