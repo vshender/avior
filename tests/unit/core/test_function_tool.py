@@ -106,6 +106,114 @@ def test_tool_without_docstring_has_empty_description() -> None:
     assert get_weather.description == ""
 
 
+def test_tool_parameterized_overrides_name_and_description() -> None:
+    """`@tool(name=..., description=...)` overrides both function defaults."""
+
+    # GIVEN a tool built with an explicit name and description
+    @tool(name="weather", description="Look up the weather.")
+    def get_weather(city: str) -> str:
+        """Original docstring, overridden below."""
+
+        return city
+
+    # THEN the overrides win over the function name and docstring
+    assert get_weather.name == "weather"
+    assert get_weather.description == "Look up the weather."
+
+
+def test_tool_parameterized_name_only_keeps_docstring_description() -> None:
+    """Giving only `name` leaves the description from the docstring."""
+
+    # GIVEN a tool built with only an explicit name
+    @tool(name="weather")
+    def get_weather(city: str) -> str:
+        """Get the weather."""
+
+        return city
+
+    # THEN name is overridden; description still comes from the docstring
+    assert get_weather.name == "weather"
+    assert get_weather.description == "Get the weather."
+
+
+def test_tool_parameterized_description_only_keeps_function_name() -> None:
+    """Giving only `description` leaves the name from the function."""
+
+    # GIVEN a tool built with only an explicit description
+    @tool(description="Look up the weather.")
+    def get_weather(city: str) -> str:
+        """Original docstring, overridden below."""
+
+        return city
+
+    # THEN description is overridden; name still comes from the function
+    assert get_weather.name == "get_weather"
+    assert get_weather.description == "Look up the weather."
+
+
+def test_tool_direct_call_with_metadata() -> None:
+    """`tool(func, name=..., description=...)` builds the tool in one call."""
+
+    # GIVEN a plain function with default metadata
+    def get_weather(city: str) -> str:
+        """Original docstring, overridden below."""
+
+        return city
+
+    # WHEN a tool is built from the function with explicit metadata in one
+    # direct call
+    named = tool(get_weather, name="weather", description="Look up the weather.")
+
+    # THEN the overrides are applied without the decorator form
+    assert named.name == "weather"
+    assert named.description == "Look up the weather."
+
+
+def test_tool_parameterized_empty_description_clears_it() -> None:
+    """An explicit `description=""` overrides the docstring with empty."""
+
+    # GIVEN a tool built with an explicit empty description
+    @tool(description="")
+    def get_weather(city: str) -> str:
+        """This docstring must not win over the explicit empty description."""
+
+        return city
+
+    # THEN the description is the explicit empty string, not the docstring
+    assert get_weather.description == ""
+
+
+def test_tool_rejects_empty_name() -> None:
+    """An empty `name` is rejected: the LLM addresses a tool by name."""
+
+    # GIVEN a function
+    def get_weather(city: str) -> str:
+        """Get the weather."""
+
+        return city
+
+    # WHEN a tool is built with an explicit empty name
+    # THEN it fails rather than producing an unaddressable tool
+    with pytest.raises(ConfigurationError, match="non-empty name"):
+        tool(get_weather, name="")
+
+
+def test_tool_rejects_none_function() -> None:
+    """`tool(None)` is a passed value, not the no-function sentinel.
+
+    The type checker already rejects this call (hence the suppressions); the
+    test pins the runtime behavior for untyped callers, and that `None` is
+    distinguished from the internal "no function passed" sentinel rather than
+    silently returning a decorator.
+    """
+
+    # GIVEN `None` passed where a function is expected
+    # WHEN `tool` is called with it as the positional function argument
+    # THEN it fails with a clear error, not a silent decorator
+    with pytest.raises(ConfigurationError, match="function or method"):
+        tool(None)  # type: ignore[call-overload]  # pyright: ignore[reportCallIssue, reportArgumentType]
+
+
 def test_tool_omits_run_context_from_args_schema() -> None:
     """A `RunContext` first parameter is detected and kept out of the schema."""
 

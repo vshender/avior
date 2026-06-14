@@ -25,6 +25,7 @@ from typing import (
     Any,
     Concatenate,
     Generic,
+    Protocol,
     cast,
     get_args,
     get_origin,
@@ -197,17 +198,81 @@ class FunctionTool[Result, Deps](Tool[Any, Result, Deps]):
         return cast(Result, out)
 
 
-# The four overloads are tried top to bottom, so their order is load-bearing.
-# Context-first: a `RunContext[Deps]` first parameter binds `Deps` and matches
-# before the context-free forms would.  Async-first: an async function binds
-# `Result` to its awaited type (the `X` in `Awaitable[X]`), not to the whole
-# `Awaitable[X]` - which is what the bare-value form would bind it to.
+class _ToolDecorator(Protocol):
+    """The decorator that `tool(name=..., description=...)` returns.
+
+    Its `__call__` repeats the four bare-`tool` overloads, so applying the
+    returned decorator to a function infers the same `FunctionTool[Result,
+    Deps]` that bare `@tool` would.  The repetition is unavoidable: the
+    ctx/async distinction resolves only when the decorator is applied to the
+    function, not when `tool(...)` builds the decorator, so the matrix has to
+    live on this `__call__` too.
+
+    The function is positional-only (`/`), as in the bare `tool` overloads and
+    for the same reason (a decorator's target is passed positionally, so its
+    parameter name is not public API); see the note above those overloads.
+    """
+
+    @overload
+    def __call__[Result, Deps, **P](
+        self,
+        func: Callable[Concatenate[RunContext[Deps], P], Awaitable[Result]],
+        /,
+    ) -> FunctionTool[Result, Deps]: ...
+
+    @overload
+    def __call__[Result, Deps, **P](
+        self,
+        func: Callable[Concatenate[RunContext[Deps], P], Result],
+        /,
+    ) -> FunctionTool[Result, Deps]: ...
+
+    @overload
+    def __call__[Result, **P](
+        self,
+        func: Callable[P, Awaitable[Result]],
+        /,
+    ) -> FunctionTool[Result, object]: ...
+
+    @overload
+    def __call__[Result, **P](
+        self,
+        func: Callable[P, Result],
+        /,
+    ) -> FunctionTool[Result, object]: ...
+
+
+# Sentinel for an omitted `func`, kept distinct from a real `func=None`: `None`
+# is not a valid function, so a passed `None` must reach the validation (and be
+# rejected), not read as "no function passed" (which is the decorator form).
+_MISSING: Any = object()
+
+
+# The four function overloads are tried top to bottom, so their order is
+# load-bearing.  Context-first: a `RunContext[Deps]` first parameter binds
+# `Deps` and matches before the context-free forms would.  Async-first: an
+# async function binds `Result` to its awaited type (the `X` in `Awaitable[X]`),
+# not to the whole `Awaitable[X]` - which is what the bare-value form would bind
+# it to.  Each of the four also accepts the optional `name` / `description`
+# kwargs, so the direct-call form `tool(func, name=...)` stays typed.  A fifth
+# overload, last, handles the parameterized `tool(name=..., description=...)`
+# call: it takes no function and returns the decorator above.
+#
+# In every form `func` is positional-only (`/`).  This follows
+# `dataclasses.dataclass(cls, /)`, the stdlib precedent for an
+# optional-argument decorator: a decorator's target is passed positionally
+# (`@tool`, `tool(f)`), so its parameter name is an internal detail, not public
+# API.
 
 
 # Reads the run context, async: `Deps` from `ctx`, `Result` from the await.
 @overload
 def tool[Result, Deps, **P](
     func: Callable[Concatenate[RunContext[Deps], P], Awaitable[Result]],
+    /,
+    *,
+    name: str | None = ...,
+    description: str | None = ...,
 ) -> FunctionTool[Result, Deps]: ...
 
 
@@ -215,6 +280,10 @@ def tool[Result, Deps, **P](
 @overload
 def tool[Result, Deps, **P](
     func: Callable[Concatenate[RunContext[Deps], P], Result],
+    /,
+    *,
+    name: str | None = ...,
+    description: str | None = ...,
 ) -> FunctionTool[Result, Deps]: ...
 
 
@@ -222,6 +291,10 @@ def tool[Result, Deps, **P](
 @overload
 def tool[Result, **P](
     func: Callable[P, Awaitable[Result]],
+    /,
+    *,
+    name: str | None = ...,
+    description: str | None = ...,
 ) -> FunctionTool[Result, object]: ...
 
 
@@ -229,10 +302,30 @@ def tool[Result, **P](
 @overload
 def tool[Result, **P](
     func: Callable[P, Result],
+    /,
+    *,
+    name: str | None = ...,
+    description: str | None = ...,
 ) -> FunctionTool[Result, object]: ...
 
 
-def tool(func: Callable[..., object]) -> FunctionTool[Any, Any]:
+# Parameterized: called with metadata and no function, so it returns the
+# decorator (which carries the four overloads again, via `_ToolDecorator`).
+@overload
+def tool(
+    *,
+    name: str | None = ...,
+    description: str | None = ...,
+) -> _ToolDecorator: ...
+
+
+def tool(
+    func: Any = _MISSING,
+    /,
+    *,
+    name: str | None = None,
+    description: str | None = None,
+) -> FunctionTool[Any, Any] | _ToolDecorator:
     """Turn a typed function into a `FunctionTool`.
 
     Use it bare (`@tool`) above a `def` or `async def`, or call it directly
@@ -241,20 +334,55 @@ def tool(func: Callable[..., object]) -> FunctionTool[Any, Any]:
     annotated `RunContext[Deps]` is recognized as the run context and kept out
     of the arguments model.
 
+    Pass `name` or `description` to override the values that would otherwise
+    come from the function's `__name__` and docstring; either may be given on
+    its own.  Both work as a parameterized decorator (`@tool(name=...)`, which
+    returns the decorator) and in a direct call (`tool(func, name=...)`).  An
+    explicit `description=""` clears the description; an empty `name` is
+    rejected, since the LLM addresses a tool by name.
+
     For a method, pass a bound one - `tool(instance.method)` - whose signature
     has already dropped `self`.  Applying `@tool` to a method in a class body
     wraps the unbound function and is rejected, since `self` is unbound there.
     """
 
-    args_model, takes_ctx, positional_params = _build_args_model(func)
-    return FunctionTool(
-        name=func.__name__,
-        description=inspect.getdoc(func) or "",
-        args_model=args_model,
-        func=func,
-        takes_ctx=takes_ctx,
-        positional_params=positional_params,
-    )
+    def make(func: Callable[..., object], /) -> FunctionTool[Any, Any]:
+        # Validate the function first: it rejects a non-function (e.g. a passed
+        # `None`) with a clear error before `func.__name__` is read below.
+        args_model, takes_ctx, positional_params = _build_args_model(func)
+
+        resolved_name = name if name is not None else func.__name__
+        if not resolved_name:
+            raise ConfigurationError(
+                f"@tool needs a non-empty name; got an empty `name` for "
+                f"{func.__name__!r}."
+            )
+
+        resolved_description = (
+            description if description is not None else (inspect.getdoc(func) or "")
+        )
+
+        return FunctionTool(
+            name=resolved_name,
+            description=resolved_description,
+            args_model=args_model,
+            func=func,
+            takes_ctx=takes_ctx,
+            positional_params=positional_params,
+        )
+
+    # Dispatch on whether a function is in hand:
+    #
+    # - parameterized form `@tool(...)`: no function yet -> return the decorator
+    #   that builds the tool once applied;
+    # - bare `@tool` or direct `tool(func[, name=...])`: a function in hand ->
+    #   build now;
+    # - a passed `None` is not the sentinel, so it flows into `make`, where
+    #   `_build_args_model` rejects it (the type system already rejects
+    #   `tool(None)`; this is the runtime guard for untyped callers).
+    if func is _MISSING:
+        return cast(_ToolDecorator, make)
+    return make(func)
 
 
 def _build_args_model(
