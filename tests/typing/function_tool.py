@@ -99,6 +99,23 @@ _direct = tool(_plain, name="renamed", description="A renamed tool.")
 assert_type(_direct, FunctionTool[str, object])
 
 
+# `docstring_format` is part of every overload, so a valid value still resolves
+# the same `FunctionTool` - the call does not instead match the parameterized,
+# decorator-returning overload.
+_fmt_direct = tool(_plain, docstring_format="numpy")
+assert_type(_fmt_direct, FunctionTool[str, object])
+
+
+@tool(docstring_format="sphinx")
+def _fmt_param(city: str) -> str:
+    """A parameterized tool with a pinned docstring format."""
+
+    return city
+
+
+assert_type(_fmt_param, FunctionTool[str, object])
+
+
 # A `_Base`-requiring tool fits a `_Base` agent ...
 assert_type(
     Agent(instructions="", model_settings=_MS, tools=[_ctx_sync], deps_type=_Base),
@@ -122,3 +139,7 @@ assert_type(
 _n1: Tool[Any, bool, _Base] = _ctx_async  # type: ignore[assignment]  # pyright: ignore[reportAssignmentType]
 # The same rule at the `Agent` boundary, where the tool list lives.
 _n2: Agent[_Base] = Agent(instructions="", model_settings=_MS, tools=[_ctx_async])  # type: ignore[list-item]  # pyright: ignore[reportAssignmentType]
+# An unknown `docstring_format` is REJECTED: the `DocstringFormat` literal pins
+# the accepted values (the runtime guard in `tool` backs this for untyped
+# callers).
+tool(_plain, docstring_format="bad")  # type: ignore[call-overload]  # pyright: ignore[reportArgumentType, reportCallIssue]

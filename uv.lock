@@ -52,6 +52,7 @@ name = "avior"
 version = "0.1.0a1"
 source = { editable = "." }
 dependencies = [
+    { name = "docstring-parser" },
     { name = "pydantic" },
     { name = "typing-extensions" },
 ]
@@ -83,6 +84,7 @@ dev = [
 requires-dist = [
     { name = "anthropic", marker = "extra == 'anthropic'", specifier = ">=0.40" },
     { name = "avior", extras = ["anthropic", "openai"], marker = "extra == 'all'" },
+    { name = "docstring-parser", specifier = ">=0.16" },
     { name = "openai", marker = "extra == 'openai'", specifier = ">=1.50" },
     { name = "pydantic", specifier = ">=2.10" },
     { name = "typing-extensions", specifier = ">=4.12" },

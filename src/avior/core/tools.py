@@ -16,6 +16,8 @@ does.
 """
 
 import inspect
+import textwrap
+import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -25,6 +27,7 @@ from typing import (
     Any,
     Concatenate,
     Generic,
+    Literal,
     Protocol,
     cast,
     get_args,
@@ -33,11 +36,26 @@ from typing import (
     overload,
 )
 
+from docstring_parser import Docstring, DocstringStyle
+from docstring_parser import parse as parse_docstring
 from pydantic import BaseModel, create_model
+from pydantic.fields import FieldInfo
 from typing_extensions import TypeVar
 
 from avior.core.context import RunContext
 from avior.core.exceptions import ConfigurationError
+
+# `@tool` reads parameter and result documentation from a docstring in one of
+# these styles.  `auto` lets `docstring_parser` detect the style; the rest pin
+# it.
+type DocstringFormat = Literal["auto", "google", "numpy", "sphinx"]
+
+_DOCSTRING_STYLES: dict[DocstringFormat, DocstringStyle] = {
+    "auto": DocstringStyle.AUTO,
+    "google": DocstringStyle.GOOGLE,
+    "numpy": DocstringStyle.NUMPYDOC,
+    "sphinx": DocstringStyle.REST,
+}
 
 # `Tool` is *invariant* in `Args`: the parameter appears both covariantly
 # (`args_model: type[Args]`) and contravariantly (`execute`'s `args`
@@ -249,14 +267,19 @@ _MISSING: Any = object()
 
 
 # The four function overloads are tried top to bottom, so their order is
-# load-bearing.  Context-first: a `RunContext[Deps]` first parameter binds
-# `Deps` and matches before the context-free forms would.  Async-first: an
-# async function binds `Result` to its awaited type (the `X` in `Awaitable[X]`),
-# not to the whole `Awaitable[X]` - which is what the bare-value form would bind
-# it to.  Each of the four also accepts the optional `name` / `description`
-# kwargs, so the direct-call form `tool(func, name=...)` stays typed.  A fifth
-# overload, last, handles the parameterized `tool(name=..., description=...)`
-# call: it takes no function and returns the decorator above.
+# load-bearing:
+#
+# - context-first: a `RunContext[Deps]` first parameter binds `Deps` and
+#   matches before the context-free forms would;
+# - async-first: an async function binds `Result` to its awaited type (the `X`
+#   in `Awaitable[X]`), not to the whole `Awaitable[X]` - which is what the
+#   bare-value form would bind it to.
+#
+# Each of the four also accepts the optional keyword parameters that configure
+# the tool (`name`, `description`, ...), so the direct-call form
+# `tool(func, name=...)` stays typed.  A fifth overload, last, handles the
+# parameterized form - called with those keywords and no function: it returns
+# the decorator above.
 #
 # In every form `func` is positional-only (`/`).  This follows
 # `dataclasses.dataclass(cls, /)`, the stdlib precedent for an
@@ -273,6 +296,7 @@ def tool[Result, Deps, **P](
     *,
     name: str | None = ...,
     description: str | None = ...,
+    docstring_format: DocstringFormat = ...,
 ) -> FunctionTool[Result, Deps]: ...
 
 
@@ -284,6 +308,7 @@ def tool[Result, Deps, **P](
     *,
     name: str | None = ...,
     description: str | None = ...,
+    docstring_format: DocstringFormat = ...,
 ) -> FunctionTool[Result, Deps]: ...
 
 
@@ -295,6 +320,7 @@ def tool[Result, **P](
     *,
     name: str | None = ...,
     description: str | None = ...,
+    docstring_format: DocstringFormat = ...,
 ) -> FunctionTool[Result, object]: ...
 
 
@@ -306,6 +332,7 @@ def tool[Result, **P](
     *,
     name: str | None = ...,
     description: str | None = ...,
+    docstring_format: DocstringFormat = ...,
 ) -> FunctionTool[Result, object]: ...
 
 
@@ -316,6 +343,7 @@ def tool(
     *,
     name: str | None = ...,
     description: str | None = ...,
+    docstring_format: DocstringFormat = ...,
 ) -> _ToolDecorator: ...
 
 
@@ -325,6 +353,7 @@ def tool(
     *,
     name: str | None = None,
     description: str | None = None,
+    docstring_format: DocstringFormat = "auto",
 ) -> FunctionTool[Any, Any] | _ToolDecorator:
     """Turn a typed function into a `FunctionTool`.
 
@@ -334,22 +363,52 @@ def tool(
     annotated `RunContext[Deps]` is recognized as the run context and kept out
     of the arguments model.
 
-    Pass `name` or `description` to override the values that would otherwise
-    come from the function's `__name__` and docstring; either may be given on
-    its own.  Both work as a parameterized decorator (`@tool(name=...)`, which
-    returns the decorator) and in a direct call (`tool(func, name=...)`).  An
-    explicit `description=""` clears the description; an empty `name` is
-    rejected, since the LLM addresses a tool by name.
-
     For a method, pass a bound one - `tool(instance.method)` - whose signature
     has already dropped `self`.  Applying `@tool` to a method in a class body
     wraps the unbound function and is rejected, since `self` is unbound there.
+
+    The function's parameters and return value can be annotated to document the
+    tool for the LLM (both optional):
+
+    - a parameter annotated `Annotated[T, Field(description=...)]` carries that
+      description onto its schema field;
+    - the return annotated `Annotated[ReturnT, Field(description=...)]`
+      documents the tool's result.
+
+    The docstring is the other source of the same documentation, and the
+    annotations above win over it.  Each parameter's `Args` entry fills its
+    schema field description, unless the parameter's `Field` already set one.
+    The tool's description is the docstring's summary and body, with the
+    `Returns`, `Raises`, and `Examples` sections kept and the `Args` section
+    dropped (its content has moved into the schema).  A `Returns` section
+    documents the result only when the return annotation did not, and is folded
+    into the description, since the tool-call protocol has no separate slot for
+    it.
+
+    Three optional keyword parameters configure the tool, each usable both as a
+    parameterized decorator (`@tool(name=...)`, which returns the decorator) and
+    in a direct call (`tool(func, name=...)`):
+
+    - `name` overrides the tool name that otherwise comes from the function's
+      `__name__`; an empty `name` is rejected, since the LLM addresses a tool by
+      name;
+    - `description` overrides the description that otherwise comes from the
+      docstring; an explicit `description=""` clears it;
+    - `docstring_format` pins the docstring style (`google` / `numpy` /
+      `sphinx`); the default `auto` detects it.
+
+    A `sphinx` docstring is a ReST field list, which does not delimit what
+    follows it: text after the last field (`:param:` / `:returns:` / `:raises:`)
+    is read as part of that field's description.  Keep narrative in the summary
+    and body, before the field list.  (`sphinx` also has no `Examples` section;
+    examples are a `google` / `numpy` concept.)
     """
 
     def make(func: Callable[..., object], /) -> FunctionTool[Any, Any]:
         # Validate the function first: it rejects a non-function (e.g. a passed
-        # `None`) with a clear error before `func.__name__` is read below.
-        args_model, takes_ctx, positional_params = _build_args_model(func)
+        # `None`) with a clear error before `func.__name__` is read below, and
+        # before the docstring is parsed.
+        args_model, ctx_name, positional_params = _build_args_model(func)
 
         resolved_name = name if name is not None else func.__name__
         if not resolved_name:
@@ -358,16 +417,31 @@ def tool(
                 f"{func.__name__!r}."
             )
 
-        resolved_description = (
-            description if description is not None else (inspect.getdoc(func) or "")
-        )
+        # Parse once: the same parsed docstring fills the parameter descriptions
+        # and (unless overridden) builds the tool description.
+        parsed_docstring = _parse_docstring(func, docstring_format)
+        if parsed_docstring is not None:
+            _warn_unknown_doc_params(
+                parsed_docstring,
+                args_model,
+                ctx_name,
+                func.__name__,
+            )
+            _apply_param_descriptions(args_model, parsed_docstring)
+
+        if description is not None:
+            resolved_description = description
+        else:
+            return_description = _annotated_return_description(func)
+            doc = _tool_doc(parsed_docstring, return_description)
+            resolved_description = _render_description(doc)
 
         return FunctionTool(
             name=resolved_name,
             description=resolved_description,
             args_model=args_model,
             func=func,
-            takes_ctx=takes_ctx,
+            takes_ctx=ctx_name is not None,
             positional_params=positional_params,
         )
 
@@ -387,15 +461,20 @@ def tool(
 
 def _build_args_model(
     func: Callable[..., object],
-) -> tuple[type[BaseModel], bool, tuple[str, ...]]:
+) -> tuple[type[BaseModel], str | None, tuple[str, ...]]:
     """Derive a tool's arguments model from a function signature.
 
-    Returns the generated model, whether the function takes the run context as
-    its first parameter, and the names of its positional-only parameters (in
-    order, to pass them positionally).  `Annotated[T, Field(...)]`
-    metadata (such as a parameter description) is carried onto the model field.
-    A parameter with no annotation is typed `Any`; one with a default keeps it,
-    so the field is not required.
+    Returns three values:
+
+    - the generated model;
+    - the name of the run-context parameter, or `None` if the function takes
+      none;
+    - the names of its positional-only parameters, in order, to pass them
+      positionally.
+
+    `Annotated[T, Field(...)]` metadata (such as a parameter description) is
+    carried onto the model field.  A parameter with no annotation is typed
+    `Any`; one with a default keeps it, so the field is not required.
 
     Raises `ConfigurationError` for a signature that does not map to a tool: a
     `self`/`cls` first parameter (an unbound method), a `RunContext` parameter
@@ -430,8 +509,13 @@ def _build_args_model(
         )
 
     hints = _resolve_param_hints(func)
-    takes_ctx = bool(parameters) and _is_run_context(hints.get(parameters[0].name))
-    if takes_ctx:
+    # The run-context parameter is matched by type, so its name is arbitrary.
+    ctx_name = (
+        parameters[0].name
+        if parameters and _is_run_context(hints.get(parameters[0].name))
+        else None
+    )
+    if ctx_name is not None:
         # The context is injected positionally (`func(ctx, ...)`), so a
         # keyword-only context cannot receive it.
         if parameters[0].kind is inspect.Parameter.KEYWORD_ONLY:
@@ -493,7 +577,253 @@ def _build_args_model(
         fields[parameter.name] = (annotation, default)
 
     model = create_model(f"{func.__name__}_args", **fields)
-    return model, takes_ctx, tuple(positional_params)
+    return model, ctx_name, tuple(positional_params)
+
+
+def _parse_docstring(
+    func: Callable[..., object],
+    docstring_format: DocstringFormat,
+) -> Docstring | None:
+    """Parse the function's docstring into its sections, or `None` if it has
+    none.  Rejects an unknown `docstring_format`.
+    """
+
+    if docstring_format not in _DOCSTRING_STYLES:
+        raise ConfigurationError(
+            f"@tool got an unknown docstring_format {docstring_format!r}; "
+            f"expected one of {', '.join(map(repr, _DOCSTRING_STYLES))}."
+        )
+
+    # `inspect.getdoc` strips the indentation the docstring was written at,
+    # giving the parser clean, dedented text.
+    doc = inspect.getdoc(func)
+    if not doc:
+        return None
+
+    return parse_docstring(doc, _DOCSTRING_STYLES[docstring_format])
+
+
+def _warn_unknown_doc_params(
+    parsed_docstring: Docstring,
+    args_model: type[BaseModel],
+    ctx_name: str | None,
+    func_name: str,
+) -> None:
+    """Warn about a docstring `Args` entry that names no parameter.
+
+    A typo or a stale docstring is warned about, not raised on.  The warning
+    matters because the parameter the author meant to document is then left with
+    no description.  The run-context parameter is exempt - it is a real
+    parameter, just not a model field.
+    """
+
+    known_names = set(args_model.model_fields)
+    if ctx_name is not None:
+        known_names.add(ctx_name)
+
+    for param in parsed_docstring.params:
+        if param.arg_name not in known_names:
+            warnings.warn(
+                f"@tool: the docstring of {func_name!r} documents parameter "
+                f"{param.arg_name!r}, which is not in its signature; the "
+                f"description is ignored (check for a typo or a stale docstring).",
+                UserWarning,
+                stacklevel=3,
+            )
+
+
+def _apply_param_descriptions(args_model: type[BaseModel], parsed: Docstring) -> None:
+    """Fill each argument's description from the docstring, where it has none.
+
+    An explicit `Field(description=...)` on a parameter wins: the docstring
+    fills only the fields left without a description.
+    """
+
+    param_descriptions = {
+        param.arg_name: param.description
+        for param in parsed.params
+        if param.description
+    }
+
+    changed = False
+    for name, field in args_model.model_fields.items():
+        if field.description is None and name in param_descriptions:
+            field.description = param_descriptions[name]
+            changed = True
+
+    # The schema is generated from the model's cached core schema, not read live
+    # from `model_fields`.  `model_rebuild` recompiles that core schema from the
+    # now-updated fields, so the added descriptions show up.
+    if changed:
+        args_model.model_rebuild(force=True)
+
+
+def _annotated_return_description(func: Callable[..., object]) -> str | None:
+    """Read a result description from `Annotated` metadata on the return type.
+
+    Uses the same form as a parameter - `Annotated[ReturnT, Field(description=
+    ...)]` - so documentation is written one way throughout.  Returns `None` if
+    there is no such metadata, or if the return annotation cannot be resolved at
+    runtime.  A parameter annotation drives the schema, so an unresolvable one
+    is an error; a result description is only documentation, so an unresolvable
+    return is skipped rather than raised on.
+
+    An explicit but empty description (`Field` with `description=""`) returns
+    the empty string, kept distinct from `None`: it is present-but-empty, which
+    lets the caller suppress a `Returns` section rather than fall through to it.
+    """
+
+    return_annotation = inspect.signature(func).return_annotation
+    if return_annotation is inspect.Signature.empty:
+        return None
+
+    # Resolve only the return annotation, through a shim, so an unresolvable
+    # *other* annotation cannot mask it - notably a bound method's `self`, which
+    # `get_type_hints(func)` would resolve too and raise on.
+    shim = SimpleNamespace()
+    shim.__annotations__ = {"return": return_annotation}
+    try:
+        # `include_extras` keeps the `Annotated[...]` wrapper, without which the
+        # metadata read below is stripped and there is nothing to find.
+        resolved = get_type_hints(
+            shim,
+            globalns=func.__globals__,
+            include_extras=True,
+        ).get("return")
+    except (NameError, AttributeError):
+        return None
+
+    if get_origin(resolved) is not Annotated:
+        return None
+
+    for meta in get_args(resolved)[1:]:
+        if isinstance(meta, FieldInfo) and meta.description is not None:
+            return meta.description
+
+    return None
+
+
+@dataclass(frozen=True)
+class _ToolDoc:
+    """The parser-agnostic pieces a tool description is rendered from.
+
+    Precedence is already resolved (annotations over the docstring) and example
+    bodies are already dedented.  It holds no `docstring_parser` type, so it is
+    the stable shape a renderer consumes - and it survives a change of parsing
+    engine.
+    """
+
+    summary: str
+    """The docstring's first line; `""` when there is none."""
+
+    body: str
+    """The docstring's body after the summary; `""` when there is none."""
+
+    returns: str
+    """The result description, with annotation-over-docstring precedence
+    resolved; `""` when there is none or it was explicitly cleared.
+    """
+
+    raises: tuple[tuple[str | None, str], ...]
+    """The documented exceptions, as `(type, description)` pairs."""
+
+    examples: tuple[str, ...]
+    """The example bodies, dedented but not fenced."""
+
+
+def _tool_doc(
+    docstring_parsed: Docstring | None,
+    return_description: str | None,
+) -> _ToolDoc:
+    """Extract the description pieces from the docstring and the return type.
+
+    The parser-coupled half: it reads `docstring_parser`'s output and resolves
+    what wins.  `return_description` (from `Annotated` metadata on the return)
+    wins over the docstring's `Returns` section - an explicit empty string is
+    kept (it suppresses the section); only `None` falls through to the
+    docstring.
+
+    Freeform sections (such as `Notes`) are dropped: the parser keeps them only
+    for some styles, so dropping them keeps the output the same across styles.
+    `docstring_parser` already dedents every section, so the pieces need no
+    further dedenting here.
+    """
+
+    summary = (docstring_parsed.short_description if docstring_parsed else None) or ""
+    body = (docstring_parsed.long_description if docstring_parsed else None) or ""
+
+    # The annotation wins over the docstring; an explicit empty annotation
+    # (`return_description == ""`) still takes the first branch, so it
+    # suppresses the docstring `Returns` rather than falling through to it.
+    # Past that decision, `None` and `""` mean the same thing - no `Returns`
+    # section - so they collapse to `""`, keeping `_ToolDoc` uniform.
+    resolved: str | None = None
+    if return_description is not None:
+        resolved = return_description
+    elif docstring_parsed and docstring_parsed.returns:
+        resolved = docstring_parsed.returns.description
+    returns = resolved or ""
+
+    raises = (
+        tuple((exc.type_name, exc.description or "") for exc in docstring_parsed.raises)
+        if docstring_parsed
+        else ()
+    )
+
+    examples = (
+        tuple(
+            "\n".join(part for part in (ex.snippet, ex.description) if part).strip("\n")
+            for ex in docstring_parsed.examples
+        )
+        if docstring_parsed
+        else ()
+    )
+
+    return _ToolDoc(
+        summary=summary,
+        body=body,
+        returns=returns,
+        raises=raises,
+        examples=examples,
+    )
+
+
+def _render_description(doc: _ToolDoc) -> str:
+    """Render the pieces into the tool's LLM-facing description.
+
+    The format half, and the seam a custom renderer would replace: it owns the
+    section headers, the fencing of examples, and the order.  It only formats
+    the pieces and adds no content of its own - content and precedence are
+    already decided in `_tool_doc`.  A piece that is empty renders no section.
+    """
+
+    sections: list[str] = []
+
+    lead = "\n\n".join(part for part in (doc.summary, doc.body) if part)
+    if lead:
+        sections.append(lead)
+
+    if doc.returns:
+        sections.append(f"Returns:\n{textwrap.indent(doc.returns, '    ')}")
+
+    if doc.raises:
+        entries: list[str] = []
+        for exc_type, description in doc.raises:
+            label = f"{exc_type}: " if exc_type else ""
+            # First line of the entry sits at 4 spaces; a multi-line description
+            # continues at 8, so it nests under the entry instead of reading as
+            # a new one.
+            head, *rest = f"{label}{description}".split("\n")
+            block = [f"    {head}".rstrip()]
+            block += [f"        {line}".rstrip() for line in rest]
+            entries.append("\n".join(block))
+        sections.append("Raises:\n" + "\n".join(entries))
+
+    if doc.examples:
+        blocks = [f"```\n{example}\n```" for example in doc.examples]
+        sections.append("Examples:\n" + "\n\n".join(blocks))
+
+    return "\n\n".join(sections)
 
 
 def _resolve_param_hints(func: Callable[..., object]) -> dict[str, Any]:

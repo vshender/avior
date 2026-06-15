@@ -9,7 +9,7 @@ coercion is Pydantic's behavior, not `@tool`'s to prove.
 import functools
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Annotated
+from typing import Annotated, Any
 
 import pytest
 from pydantic import BaseModel, Field
@@ -181,6 +181,369 @@ def test_tool_parameterized_empty_description_clears_it() -> None:
 
     # THEN the description is the explicit empty string, not the docstring
     assert get_weather.description == ""
+
+
+def test_tool_lifts_param_description_from_docstring() -> None:
+    """A parameter's docstring `Args` entry fills its schema field."""
+
+    # GIVEN a tool whose docstring documents a parameter
+    @tool
+    def get_weather(city: str) -> str:
+        """Get the weather.
+
+        Args:
+            city: The city to look up.
+        """
+
+        return city
+
+    # WHEN the schema is taken
+    schema = get_weather.args_model.model_json_schema()
+
+    # THEN the field carries the description from the docstring
+    assert schema["properties"]["city"]["description"] == "The city to look up."
+
+
+def test_tool_explicit_field_wins_over_docstring_param() -> None:
+    """An explicit `Field(description=...)` beats the docstring `Args` entry."""
+
+    # GIVEN a parameter documented both by a Field and the docstring
+    @tool
+    def get_weather(
+        city: Annotated[str, Field(description="from Field")],
+    ) -> str:
+        """Get the weather.
+
+        Args:
+            city: from docstring.
+        """
+
+        return city
+
+    # WHEN the schema is taken
+    schema = get_weather.args_model.model_json_schema()
+
+    # THEN the explicit `Field` description wins
+    assert schema["properties"]["city"]["description"] == "from Field"
+
+
+def test_tool_explicit_description_still_lifts_param_docs() -> None:
+    """An explicit `description` overrides the tool text but still lets the
+    docstring fill parameter descriptions - the two are independent.
+    """
+
+    # GIVEN a description override on a tool whose docstring documents a param
+    @tool(description="Overridden.")
+    def get_weather(city: str) -> str:
+        """This summary is overridden.
+
+        Args:
+            city: The city to look up.
+        """
+
+        return city
+
+    # WHEN its description and arguments schema are read
+    schema = get_weather.args_model.model_json_schema()
+
+    # THEN the description is the override
+    assert get_weather.description == "Overridden."
+    # AND the parameter description is still lifted from the docstring
+    assert schema["properties"]["city"]["description"] == "The city to look up."
+
+
+def test_tool_warns_on_docstring_param_not_in_signature() -> None:
+    """A docstring `Args` entry naming no parameter warns - not raises.
+
+    The function may be third-party, so a stale or mistyped docstring must not
+    break tool construction; the warning surfaces that the parameter the author
+    meant to document is left undocumented.
+    """
+
+    # GIVEN a function whose docstring documents a misspelled parameter
+    # WHEN it is wrapped as a tool
+    # THEN a warning is raised rather than the entry silently dropped
+    with pytest.warns(UserWarning, match="not in its signature"):
+
+        @tool
+        def get_weather(city: str) -> str:
+            """Get the weather.
+
+            Args:
+                citY: typo for `city`.
+            """
+
+            return city
+
+    # AND the tool is still built - the warning is not an error
+    assert get_weather.name == "get_weather"
+
+
+def test_tool_documenting_ctx_param_does_not_warn(
+    recwarn: pytest.WarningsRecorder,
+) -> None:
+    """Documenting the run-context parameter is allowed, not 'unknown'."""
+
+    # GIVEN a tool built from a function that documents its `RunContext` param
+    @tool
+    def get_weather(ctx: RunContext[object], city: str) -> str:
+        """Get the weather.
+
+        Args:
+            ctx: the run context.
+            city: the city to look up.
+        """
+
+        return city
+
+    # WHEN its arguments schema is read
+    schema = get_weather.args_model.model_json_schema()
+
+    # THEN no warning is raised (`ctx` is a real parameter, just not a field),
+    assert len(recwarn) == 0
+    # AND `ctx` is kept out of the schema (it is the run context, not an arg)
+    assert "ctx" not in schema["properties"]
+
+
+def test_tool_numpy_examples_are_preserved() -> None:
+    """NumPy-style examples keep their content (the doctest line survives)."""
+
+    # GIVEN a NumPy-style docstring with a doctest example
+    @tool(docstring_format="numpy")
+    def do(x: int) -> int:
+        """Do a thing.
+
+        Examples
+        --------
+        >>> do(1)
+        2
+        """
+
+        return x
+
+    # WHEN the description is read
+    description = do.description
+
+    # THEN both the call line and its output reach the description
+    assert "Examples:" in description
+    assert ">>> do(1)" in description
+    assert "\n2\n" in description
+
+
+def test_tool_description_keeps_sections_except_args() -> None:
+    """The description keeps body/Returns/Raises/Examples, drops Args/Notes."""
+
+    # GIVEN a tool with a full multi-section docstring
+    @tool
+    def get_weather(city: str) -> str:
+        """Get the weather for a city.
+
+        More detail about the lookup.
+
+        Args:
+            city: The city to look up.
+
+        Returns:
+            A weather summary.
+
+        Raises:
+            ValueError: If the city is unknown.
+
+        Examples:
+            >>> get_weather("London")
+            'cloudy'
+
+        Notes:
+            Dropped, since it is not portable across styles.
+        """
+
+        return city
+
+    # WHEN the description is read
+    description = get_weather.description
+
+    # THEN the summary and body are kept
+    assert description.startswith(
+        "Get the weather for a city.\n\nMore detail about the lookup."
+    )
+    # AND the Returns / Raises / Examples sections are kept
+    assert "Returns:\n    A weather summary." in description
+    assert "Raises:\n    ValueError: If the city is unknown." in description
+    assert "Examples:\n```\n>>> get_weather(\"London\")\n'cloudy'\n```" in description
+    # AND the Args section content and freeform Notes are dropped
+    assert "The city to look up." not in description
+    assert "Notes" not in description
+
+
+def test_tool_multiline_raises_description_nests_continuation() -> None:
+    """A wrapped `Raises` description continues indented under its entry."""
+
+    # GIVEN a tool whose Raises entry has a multi-line description
+    @tool
+    def get_weather(city: str) -> str:
+        """Get the weather.
+
+        Raises:
+            ValueError: the city code is unknown
+                or not yet supported.
+        """
+
+        return city
+
+    # WHEN the description is read
+    description = get_weather.description
+
+    # THEN the continuation line nests at 8 spaces under the entry, rather than
+    # going flush-left (which would read as a separate, type-less entry)
+    assert (
+        "Raises:\n"
+        "    ValueError: the city code is unknown\n"
+        "        or not yet supported." in description
+    )
+
+
+def test_tool_folds_annotated_return_description() -> None:
+    """A return with `Field(description=...)` becomes a Returns section."""
+
+    # GIVEN a tool whose return type carries a description
+    @tool
+    def add(x: int, y: int) -> Annotated[int, Field(description="The sum of x and y.")]:
+        """Add two numbers."""
+
+        return x + y
+
+    # WHEN the description is read
+    description = add.description
+
+    # THEN the return description is folded into the tool description
+    assert description == "Add two numbers.\n\nReturns:\n    The sum of x and y."
+
+
+def test_tool_annotated_return_wins_over_returns_section() -> None:
+    """An annotated return beats a `Returns` section, mirroring params."""
+
+    # GIVEN both an annotated return and a Returns section
+    @tool
+    def add(x: int, y: int) -> Annotated[int, Field(description="from annotation")]:
+        """Add two numbers.
+
+        Returns:
+            from docstring.
+        """
+
+        return x + y
+
+    # THEN the annotation wins
+    assert "from annotation" in add.description
+    assert "from docstring" not in add.description
+
+
+def test_tool_annotated_return_survives_unresolvable_self() -> None:
+    """A bound method's annotated return is read even when `self` is
+    unresolvable - the return resolves in isolation, like parameters do.
+    """
+
+    # GIVEN a bound method with an annotated return whose `self` annotation
+    # cannot be resolved at runtime (a forward ref to a missing type - the
+    # scenario `@tool` already supports for parameters).  Inject it directly to
+    # avoid a source-level forward ref the type checkers would flag.
+    class Service:
+        def fetch(
+            self, n: int
+        ) -> Annotated[int, Field(description="the fetched value")]:
+            return n
+
+    Service.fetch.__annotations__["self"] = "MissingSelf"
+
+    # WHEN a tool is built from the bound method
+    fetch_tool = tool(Service().fetch)
+
+    # THEN the return description still reaches the tool description - the
+    # unresolvable `self` does not mask it
+    assert "the fetched value" in fetch_tool.description
+
+
+def test_tool_parses_non_google_style_via_auto() -> None:
+    """Auto-detection handles a non-Google style (here, NumPy)."""
+
+    # GIVEN a tool documented in NumPy style
+    @tool
+    def get_weather(city: str) -> str:
+        """Get the weather.
+
+        Parameters
+        ----------
+        city : str
+            The city to look up.
+        """
+
+        return city
+
+    # WHEN the schema is taken
+    schema = get_weather.args_model.model_json_schema()
+
+    # THEN the NumPy `Parameters` section still fills the field description
+    assert schema["properties"]["city"]["description"] == "The city to look up."
+
+
+def test_tool_empty_annotated_return_suppresses_returns_section() -> None:
+    """An explicit empty result description differs from no annotation."""
+
+    # GIVEN an explicitly empty return annotation alongside a Returns section
+    @tool
+    def add(x: int, y: int) -> Annotated[int, Field(description="")]:
+        """Add two numbers.
+
+        Returns:
+            this docstring text must be suppressed.
+        """
+
+        return x + y
+
+    # THEN the explicit empty wins: no Returns section is emitted at all
+    assert add.description == "Add two numbers."
+
+
+def test_tool_rejects_unknown_docstring_format() -> None:
+    """An unknown `docstring_format` is rejected at the API boundary."""
+
+    # GIVEN a function (with and without a docstring, to cover both paths)
+    def documented(city: str) -> str:
+        """Get the weather."""
+
+        return city
+
+    def undocumented(city: str) -> str:
+        return city
+
+    # WHEN a tool is built with an invalid format - the type system rejects it
+    # for a typed caller, so this guards the untyped one (the value is typed
+    # `Any`)
+    bad_format: Any = "bad"
+
+    # THEN it fails with a clear error rather than a raw `KeyError`, whether or
+    # not the function has a docstring
+    for func in (documented, undocumented):
+        with pytest.raises(ConfigurationError, match="unknown docstring_format"):
+            tool(func, docstring_format=bad_format)
+
+
+def test_tool_docstring_format_pins_the_style() -> None:
+    """`docstring_format` pins the style for parsing."""
+
+    # GIVEN a Sphinx-style docstring parsed with the style pinned
+    @tool(docstring_format="sphinx")
+    def get_weather(city: str) -> str:
+        """Get the weather.
+
+        :param city: The city to look up.
+        """
+
+        return city
+
+    # THEN the Sphinx `:param:` entry fills the field description
+    schema = get_weather.args_model.model_json_schema()
+    assert schema["properties"]["city"]["description"] == "The city to look up."
 
 
 def test_tool_rejects_empty_name() -> None:

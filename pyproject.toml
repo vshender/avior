@@ -19,6 +19,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
+    "docstring-parser>=0.16",
     "pydantic>=2.10",
     "typing-extensions>=4.12",
 ]
