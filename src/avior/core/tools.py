@@ -122,6 +122,12 @@ class Tool(ABC, Generic[Args, Result, Deps]):
     - its JSON schema is sent to the LLM as the tool's input schema;
     - arguments the LLM returns are validated and coerced through it before
       reaching `execute`.
+
+    Field descriptions are part of that schema, so the LLM reads them.  Set a
+    field's description with `Field(description=...)`, or write a docstring
+    under the field and enable attribute docstrings on the model
+    (`model_config = ConfigDict(use_attribute_docstrings=True)`).
+    `Field(description=...)` wins where a field sets both.
     """
 
     @abstractmethod

@@ -12,8 +12,9 @@ Run with: `uv run python examples/03_local_tool.py`
 """
 
 import asyncio
+from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from avior.core import Agent, ModelSettings, RunContext, Runner, Tool
 from avior.providers.anthropic import AnthropicProvider
@@ -22,7 +23,18 @@ from avior.providers.anthropic import AnthropicProvider
 class WeatherArgs(BaseModel):
     """Arguments for the `get_weather` tool."""
 
+    # The LLM reads each field's description from the schema.  Two ways to set
+    # one: `use_attribute_docstrings` turns the docstring under a field into its
+    # description, and `Field(description=...)` sets it directly.  A field that
+    # uses both keeps the `Field` one.
+    model_config = ConfigDict(use_attribute_docstrings=True)
+
     city: str
+    """The city to report the weather for."""
+
+    units: Literal["celsius", "fahrenheit"] = Field(
+        default="celsius", description="Temperature units to report in."
+    )
 
 
 class GetWeather(Tool[WeatherArgs, str]):
@@ -37,7 +49,8 @@ class GetWeather(Tool[WeatherArgs, str]):
     # its deps are.  It matches the third parameter of `Tool[WeatherArgs, str]`,
     # which is omitted here and so defaults to `object`.
     async def execute(self, ctx: RunContext[object], args: WeatherArgs) -> str:
-        return f"It is 22 degrees Celsius and sunny in {args.city}."
+        temperature = 22 if args.units == "celsius" else 72
+        return f"It is {temperature} degrees {args.units} and sunny in {args.city}."
 
 
 async def main() -> None:
