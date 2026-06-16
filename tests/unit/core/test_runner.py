@@ -11,7 +11,6 @@ from avior.core.exceptions import (
 from avior.core.messages import (
     AssistantMessage,
     Message,
-    SystemMessage,
     TextPart,
     UserMessage,
 )
@@ -38,8 +37,8 @@ async def test_runner_run_returns_assistant_text_for_hello_smoke() -> None:
     assert result.output == "Hi!"
 
 
-async def test_runner_run_prepends_system_message_with_agent_instructions() -> None:
-    """`Runner.run` sends `agent.instructions` as the first (system) message."""
+async def test_runner_run_passes_agent_instructions_as_system_prompt() -> None:
+    """`Runner.run` passes `agent.instructions` as the system prompt."""
 
     # GIVEN an agent and a runner whose provider is a recording stub
     agent = Agent(
@@ -52,14 +51,53 @@ async def test_runner_run_prepends_system_message_with_agent_instructions() -> N
     # WHEN the runner is invoked
     await runner.run(agent, "hello")
 
-    # THEN the first message sent to the provider is a `SystemMessage`
-    # carrying the agent's instructions
-    sent_messages = provider.calls[-1].messages
-    assert sent_messages[0] == SystemMessage.from_text("you are helpful")
+    # THEN the instructions are passed as the system prompt, not as a message
+    assert provider.calls[-1].system_prompt == "you are helpful"
 
 
-async def test_runner_run_appends_user_message_with_input() -> None:
-    """`Runner.run` sends the prompt as a user message after the system one."""
+async def test_runner_run_passes_no_system_prompt_when_instructions_omitted() -> None:
+    """`Runner.run` sends no system prompt when there are no instructions."""
+
+    # GIVEN an agent with no instructions
+    agent = Agent(model_settings=ModelSettings(model="test-model"))
+    provider = StubProvider.from_responses(["ok"])
+    runner = Runner(provider=provider)
+
+    # WHEN the runner is invoked
+    await runner.run(agent, "hello")
+
+    # THEN no system prompt is sent
+    assert provider.calls[-1].system_prompt is None
+
+
+@pytest.mark.parametrize("instructions", ["", "   ", "\n\t"])
+async def test_runner_run_normalizes_blank_instructions_to_none(
+    instructions: str,
+) -> None:
+    """`Runner.run` sends `None` when `instructions` is blank or whitespace.
+
+    The blank-instructions-means-no-system-prompt contract is enforced here,
+    in the one place that interprets `instructions`, so every provider (the
+    stub included) observes `None` rather than a meaningless blank string.
+    """
+
+    # GIVEN an agent whose instructions are blank or whitespace-only
+    agent = Agent(
+        instructions=instructions,
+        model_settings=ModelSettings(model="test-model"),
+    )
+    provider = StubProvider.from_responses(["ok"])
+    runner = Runner(provider=provider)
+
+    # WHEN the runner is invoked
+    await runner.run(agent, "hello")
+
+    # THEN the provider receives no system prompt
+    assert provider.calls[-1].system_prompt is None
+
+
+async def test_runner_run_sends_only_the_user_message_as_input() -> None:
+    """`Runner.run` sends the prompt as a user message, not a system one."""
 
     # GIVEN an agent and a runner whose provider is a recording stub
     agent = Agent(
@@ -72,11 +110,11 @@ async def test_runner_run_appends_user_message_with_input() -> None:
     # WHEN the runner is invoked with a specific prompt
     await runner.run(agent, "what is 2+2?")
 
-    # THEN the second message sent is a `UserMessage` carrying the prompt,
-    # and exactly two messages are sent (system + user)
+    # THEN exactly one message is sent: the user prompt (no system prompt in
+    # the transcript)
     sent_messages = provider.calls[-1].messages
-    assert len(sent_messages) == 2
-    assert sent_messages[1] == UserMessage.from_text("what is 2+2?")
+    assert len(sent_messages) == 1
+    assert sent_messages[0] == UserMessage.from_text("what is 2+2?")
 
 
 async def test_runner_run_passes_agent_model_settings_to_provider() -> None:
@@ -266,8 +304,8 @@ async def test_runner_run_usage_is_none_when_provider_reports_none() -> None:
     assert result.usage is None
 
 
-async def test_runner_run_result_messages_exclude_system_and_mark_new_turn() -> None:
-    """The result stores input plus reply, but not the system message."""
+async def test_runner_run_result_excludes_system_prompt_marks_new_turn() -> None:
+    """The result stores input plus reply, but not the system prompt."""
 
     # GIVEN an agent and a runner whose provider replies "Hi!"
     agent = Agent(
@@ -280,7 +318,7 @@ async def test_runner_run_result_messages_exclude_system_and_mark_new_turn() -> 
     result = await runner.run(agent, "hello")
 
     # THEN the transcript is the input user turn followed by the assistant
-    # reply, with no system turn
+    # reply, with no system prompt
     assert result.messages == [
         UserMessage.from_text("hello"),
         AssistantMessage(parts=[TextPart(text="Hi!")], stop_reason="stop"),
@@ -311,11 +349,10 @@ async def test_runner_run_accepts_message_list_input() -> None:
     # WHEN the runner is invoked with that transcript as input
     result = await runner.run(agent, history)
 
-    # THEN the provider receives the system turn followed by the whole input
-    assert provider.calls[-1].messages == [
-        SystemMessage.from_text("you are helpful"),
-        *history,
-    ]
+    # THEN the provider receives the whole input as the conversation, with the
+    # instructions carried separately as the system prompt
+    assert provider.calls[-1].messages == history
+    assert provider.calls[-1].system_prompt == "you are helpful"
 
     # AND the result extends the transcript with the new reply, marking it new
     new_reply = AssistantMessage(parts=[TextPart(text="I'm well.")], stop_reason="stop")
@@ -338,10 +375,9 @@ async def test_runner_run_threads_result_messages_into_next_run() -> None:
     first = await runner.run(agent, "Q1")
     second = await runner.run(agent, [*first.messages, UserMessage.from_text("Q2")])
 
-    # THEN the second call carries the full prior conversation after the system
-    # turn
+    # THEN the second call carries the full prior conversation (no system
+    # prompt in the transcript; instructions ride separately)
     assert provider.calls[-1].messages == [
-        SystemMessage.from_text("you are helpful"),
         UserMessage.from_text("Q1"),
         AssistantMessage(parts=[TextPart(text="A1")], stop_reason="stop"),
         UserMessage.from_text("Q2"),

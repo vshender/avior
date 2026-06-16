@@ -168,7 +168,7 @@ async def test_runner_raises_max_iterations_when_tools_never_settle() -> None:
     """A model that only ever calls tools trips the `max_iter` guard."""
 
     # GIVEN a provider that always requests a tool call
-    def always_call(_messages: object, _settings: object) -> AssistantMessage:
+    def always_call(_call: object) -> AssistantMessage:
         return _tool_call("c", "echo", {"value": "x"})
 
     provider = StubProvider(always_call)

@@ -19,7 +19,6 @@ from avior.core.exceptions import (
 from avior.core.messages import (
     AssistantMessage,
     Message,
-    SystemMessage,
     ToolCallPart,
     ToolMessage,
     ToolResultError,
@@ -117,11 +116,9 @@ class Runner:
                 - a sequence of messages continues an existing conversation, for
                   example a previous run's `RunResult.messages`.
 
-                Before each model call, `Runner.run` prepends a `SystemMessage`
-                from `agent.instructions` to the message list.  Provider
-                adapters then collect all `SystemMessage`s from that list.  For
-                example, an adapter may move their text into a provider-level
-                `instructions` or `system` field.
+                The conversation carries no system prompt: `agent.instructions`
+                goes to the provider separately on each model call, not into
+                this list.
             deps: The dependencies passed to the agent's tools through their
                 `RunContext`, of the agent's declared `Deps` type.  Required
                 when `Deps` is a concrete type (set on the agent via
@@ -188,14 +185,24 @@ class Runner:
         )
         tools_by_name = {tool.name: tool for tool in agent.tools}
         max_iter = max_iter if max_iter is not None else agent.max_iter
-        system = SystemMessage.from_text(agent.instructions)
+
+        # Blank instructions (empty or whitespace-only) carry no system prompt,
+        # so normalize them to `None`.
+        system_prompt = (
+            agent.instructions
+            if agent.instructions and agent.instructions.strip()
+            else None
+        )
 
         generated: list[Message] = []
         usages: list[Usage] = []
         for run_step in range(1, max_iter + 1):
-            messages: list[Message] = [system, *input_messages, *generated]
+            messages: list[Message] = [*input_messages, *generated]
             response = await self.provider.complete(
-                messages, agent.model_settings, agent.tools
+                messages,
+                agent.model_settings,
+                tools=agent.tools,
+                system_prompt=system_prompt,
             )
             message = response.message
             if response.usage is not None:

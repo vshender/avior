@@ -99,17 +99,29 @@ class Provider(ABC):
         self,
         messages: Sequence[Message],
         settings: ModelSettings,
+        *,
         tools: Sequence[Tool[Any, Any, Any]] = (),
+        system_prompt: str | None = None,
     ) -> ProviderResponse:
-        """Send `messages` to the model and return its response.
+        """Send the conversation to the model and return its response.
 
         Args:
-            messages: Conversation transcript to send to the model.
+            messages: Conversation transcript to send to the model.  Carries
+                only `user`, `assistant`, and `tool` turns - never a system
+                turn.
             settings: Per-call invocation settings.
             tools: Tools to offer the model.  The adapter sends each tool's
                 name, description, and arguments JSON schema, and parses any
                 tool calls in the response into `ToolCallPart`s on the assistant
                 message.
+            system_prompt: The system prompt for this call, or `None` for no
+                system prompt.  Pass `None` to omit it - a blank or
+                whitespace-only string is not a valid stand-in for `None`, and
+                how a provider treats one is provider-defined.  The adapter
+                sends it the way its API expects - for example a top-level
+                system field, or a system-role message.  It is separate from
+                `messages` because the system prompt is run configuration, not a
+                conversational turn.
 
         Returns:
             A `ProviderResponse` carrying the assistant message and the

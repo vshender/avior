@@ -32,9 +32,12 @@ class Agent(Generic[Deps]):
     when they need no deps, `None` when there are no tools.
     """
 
-    instructions: str
-    """System instructions for the model, prepended as a `SystemMessage` before
-    every model call by `Runner`.
+    instructions: str | None = None
+    """System instructions for the model.
+
+    `Runner` passes them to the provider as the system prompt on each model
+    call.  Blank instructions - `None`, empty, or whitespace-only - run the
+    model with no system prompt, since they convey nothing.
     """
 
     tools: Sequence[Tool[Any, Any, Deps]] = field(default_factory=tuple)

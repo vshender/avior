@@ -22,9 +22,8 @@ class RunResult(BaseModel):
     """Conversation transcript for this run.
 
     This list contains the input messages followed by the messages produced by
-    this run.  It does not include the `SystemMessage` created from
-    `agent.instructions`; `Runner.run` adds that system message again on each
-    call.
+    this run.  It carries no system prompt: `agent.instructions` is run
+    configuration passed to the provider separately, re-applied on each call.
     """
 
     new_message_index: int = Field(ge=0)

@@ -41,7 +41,6 @@ from avior.core.messages import (
     AssistantPart,
     Message,
     StopReason,
-    SystemMessage,
     TextPart,
     ToolCallPart,
     ToolMessage,
@@ -96,25 +95,25 @@ class AnthropicProvider(Provider):
         self,
         messages: Sequence[Message],
         settings: ModelSettings,
+        *,
         tools: Sequence[Tool[Any, Any, Any]] = (),
+        system_prompt: str | None = None,
     ) -> ProviderResponse:
-        """Send `messages` to Claude and return the assistant's response.
+        """Send the conversation to Claude and return the assistant's response.
 
         `max_tokens` falls back to 4096 when `settings.max_tokens is None`;
         `temperature` is forwarded only if explicitly set on `settings`.
 
         Args:
-            messages: Conversation transcript.  `SystemMessage`s are lifted
-                out of the transcript and passed as separate text blocks in
-                Anthropic's top-level `system` parameter.  Relative order is
-                preserved within each group (system-among-system,
-                non-system-among-non-system), but the interleaving between the
-                two groups is lost (Anthropic's wire format does not support
-                per-position system instructions).
+            messages: Conversation transcript (user / assistant / tool turns).
             settings: Per-call invocation settings.
             tools: Tools to offer the model.  Each is sent as an Anthropic tool
                 with its arguments JSON schema as `input_schema`; `tool_use`
                 blocks in the response are parsed back into `ToolCallPart`s.
+            system_prompt: The system prompt, sent as a text block in
+                Anthropic's top-level `system` parameter, or `None` for no
+                system prompt.  Pass `None`, not a blank string - Anthropic
+                rejects an empty or whitespace-only text block.
 
         Returns:
             A `ProviderResponse` wrapping the assistant message together with
@@ -134,11 +133,12 @@ class AnthropicProvider(Provider):
 
         logger.debug("complete: model=%s, messages=%d", settings.model, len(messages))
 
-        system, conversation = self._extract_system(messages)
-        wire_messages = [self._to_wire(m) for m in conversation]
+        wire_messages = [self._to_wire(m) for m in messages]
 
         system_param: list[TextBlockParam] | Omit = (
-            system if system is not None else omit
+            [TextBlockParam(type="text", text=system_prompt)]
+            if system_prompt is not None
+            else omit
         )
         temperature_param: float | Omit = (
             settings.temperature if settings.temperature is not None else omit
@@ -264,43 +264,8 @@ class AnthropicProvider(Provider):
         )
 
     @staticmethod
-    def _extract_system(
-        messages: Sequence[Message],
-    ) -> tuple[
-        list[TextBlockParam] | None,
-        list[UserMessage | AssistantMessage | ToolMessage],
-    ]:
-        """Pull all `SystemMessage`s out of the conversation.
-
-        Anthropic's Messages API does not accept system messages in the
-        `messages` array; the canonical IR allows them anywhere, so the adapter
-        collects them as separate `TextBlockParam`s for Anthropic's top-level
-        `system` parameter.  Empty system messages are skipped.
-
-        Returns `(blocks, rest)`; `blocks` is `None` when no non-empty system
-        message is present.
-        """
-
-        system_blocks: list[TextBlockParam] = []
-        rest: list[UserMessage | AssistantMessage | ToolMessage] = []
-        for msg in messages:
-            match msg:
-                case SystemMessage():
-                    if msg.text:
-                        system_blocks.append(TextBlockParam(type="text", text=msg.text))
-                case UserMessage() | AssistantMessage() | ToolMessage():
-                    rest.append(msg)
-                case _:
-                    assert_never(msg)
-
-        return (system_blocks or None), rest
-
-    @staticmethod
-    def _to_wire(message: UserMessage | AssistantMessage | ToolMessage) -> MessageParam:
-        """Convert an avior non-system `Message` to an Anthropic `MessageParam`.
-
-        `SystemMessage`s are not accepted - they are extracted into the
-        top-level `system` parameter by `_extract_system` upstream.
+    def _to_wire(message: Message) -> MessageParam:
+        """Convert an avior `Message` to an Anthropic `MessageParam`.
 
         Maps each message type to Anthropic's wire shape:
 

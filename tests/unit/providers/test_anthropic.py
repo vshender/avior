@@ -28,7 +28,6 @@ from avior.core.exceptions import (
 from avior.core.messages import (
     AssistantMessage,
     Message,
-    SystemMessage,
     TextPart,
     ToolCallPart,
     ToolMessage,
@@ -196,22 +195,21 @@ async def test_complete_returns_assistant_message_parsed_from_response() -> None
     assert result.message.text == "Hi!"
 
 
-async def test_complete_sends_leading_system_message_as_top_level() -> None:
-    """`complete` extracts a leading system message and sends it top-level."""
+async def test_complete_sends_system_prompt_as_top_level_block() -> None:
+    """`complete` sends the `system_prompt` as a top-level text block."""
 
-    # GIVEN a mock client and messages with a leading system message and a user
-    # message
+    # GIVEN a mock client and a system prompt alongside a user message
     mock_client = _mock_client_returning(_response("Hi!"))
     provider = _provider(mock_client)
-    messages: list[Message] = [
-        SystemMessage.from_text("be helpful"),
-        UserMessage.from_text("hello"),
-    ]
 
-    # WHEN `complete` is invoked
-    await provider.complete(messages, _settings())
+    # WHEN `complete` is invoked with a system prompt
+    await provider.complete(
+        [UserMessage.from_text("hello")],
+        _settings(),
+        system_prompt="be helpful",
+    )
 
-    # THEN the Anthropic SDK call receives the system text as a top-level
+    # THEN the Anthropic SDK call receives the system prompt as a top-level
     # block and the user message goes in `messages` as a list of content blocks
     call_kwargs = mock_client.messages.create.call_args.kwargs
     assert call_kwargs["system"] == [{"type": "text", "text": "be helpful"}]
@@ -220,86 +218,15 @@ async def test_complete_sends_leading_system_message_as_top_level() -> None:
     assert call_kwargs["messages"][0]["content"] == [{"type": "text", "text": "hello"}]
 
 
-async def test_complete_passes_system_messages_as_separate_blocks() -> None:
-    """`complete` passes all `system` messages as separate top-level blocks."""
+async def test_complete_omits_system_prompt_when_none() -> None:
+    """`complete` passes `omit` when `system_prompt` is `None`."""
 
-    # GIVEN a mock client and messages with `system` messages at several spots
+    # GIVEN a mock client
     mock_client = _mock_client_returning(_response("ok"))
     provider = _provider(mock_client)
-    messages: list[Message] = [
-        SystemMessage.from_text("first"),
-        UserMessage.from_text("hi"),
-        SystemMessage.from_text("later"),
-    ]
 
-    # WHEN `complete` is invoked
-    await provider.complete(messages, _settings())
-
-    # THEN the Anthropic SDK call receives both system texts as separate
-    # top-level blocks and the messages array contains only the user message
-    call_kwargs = mock_client.messages.create.call_args.kwargs
-    assert call_kwargs["system"] == [
-        {"type": "text", "text": "first"},
-        {"type": "text", "text": "later"},
-    ]
-    assert len(call_kwargs["messages"]) == 1
-    assert call_kwargs["messages"][0]["role"] == "user"
-    assert call_kwargs["messages"][0]["content"] == [{"type": "text", "text": "hi"}]
-
-
-async def test_complete_preserves_non_system_order_after_extraction() -> None:
-    """`complete` preserves the relative order of non-`system` messages."""
-
-    # GIVEN a mock client and messages interleaving `system` with user/assistant
-    mock_client = _mock_client_returning(_response("ok"))
-    provider = _provider(mock_client)
-    messages: list[Message] = [
-        SystemMessage.from_text("s1"),
-        UserMessage.from_text("u1"),
-        AssistantMessage(parts=[TextPart(text="a1")], stop_reason="stop"),
-        SystemMessage.from_text("s2"),
-        UserMessage.from_text("u2"),
-    ]
-
-    # WHEN `complete` is invoked
-    await provider.complete(messages, _settings())
-
-    # THEN the wire `messages` array contains only the non-`system` messages in
-    # original order
-    call_kwargs = mock_client.messages.create.call_args.kwargs
-    wire = call_kwargs["messages"]
-    assert [m["role"] for m in wire] == ["user", "assistant", "user"]
-    assert wire[0]["content"] == [{"type": "text", "text": "u1"}]
-    assert wire[1]["content"] == [{"type": "text", "text": "a1"}]
-    assert wire[2]["content"] == [{"type": "text", "text": "u2"}]
-
-
-async def test_complete_skips_empty_system_messages() -> None:
-    """`complete` skips `system` messages with empty text."""
-
-    # GIVEN a mock client and messages including an empty `system` message
-    mock_client = _mock_client_returning(_response("ok"))
-    provider = _provider(mock_client)
-    messages: list[Message] = [SystemMessage.from_text(""), UserMessage.from_text("hi")]
-
-    # WHEN `complete` is invoked
-    await provider.complete(messages, _settings())
-
-    # THEN the `system` kwarg is the `omit` sentinel (empty system is skipped)
-    call_kwargs = mock_client.messages.create.call_args.kwargs
-    assert call_kwargs["system"] is omit
-
-
-async def test_complete_omits_system_when_no_system_message() -> None:
-    """`complete` passes `omit` when the input has no system message."""
-
-    # GIVEN a mock client and messages without any system message
-    mock_client = _mock_client_returning(_response("ok"))
-    provider = _provider(mock_client)
-    messages = [UserMessage.from_text("hello")]
-
-    # WHEN `complete` is invoked
-    await provider.complete(messages, _settings())
+    # WHEN `complete` is invoked with no system prompt
+    await provider.complete([UserMessage.from_text("hello")], _settings())
 
     # THEN the `system` kwarg is the `omit` sentinel
     call_kwargs = mock_client.messages.create.call_args.kwargs
@@ -610,7 +537,11 @@ async def test_complete_sends_tools_with_name_description_and_input_schema() -> 
     provider = _provider(mock_client)
 
     # WHEN `complete` is invoked with that tool
-    await provider.complete([UserMessage.from_text("hi")], _settings(), [_Weather()])
+    await provider.complete(
+        [UserMessage.from_text("hi")],
+        _settings(),
+        tools=[_Weather()],
+    )
 
     # THEN the Anthropic SDK call carries the tool's name, description, and args
     # schema

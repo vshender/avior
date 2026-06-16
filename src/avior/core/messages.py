@@ -1,10 +1,12 @@
 """Conversation transcript primitives.
 
 A message is one turn in the conversation, tagged by its `kind` - the
-conversation role.  `system`, `user`, and `assistant` are the standard chat
-roles; `tool` carries tool-call results.  Each kind is its own class so that
-fields meaningful only on certain kinds (such as `stop_reason` on assistant
-turns) live exactly where they apply, making invalid states unrepresentable.
+conversation role.  `user` and `assistant` are the standard chat roles; `tool`
+carries tool-call results.  There is no system role: the system prompt is run
+configuration passed to the provider separately, not a turn in the transcript.
+Each kind is its own class so that fields meaningful only on certain kinds (such
+as `stop_reason` on assistant turns) live exactly where they apply, making
+invalid states unrepresentable.
 
 Provider adapters translate between this canonical form and the wire shape of
 the underlying API.
@@ -121,29 +123,6 @@ type Part = Annotated[
 """Any typed content part of a message.  Discriminated on `kind`."""
 
 
-class SystemMessage(BaseModel):
-    """A `system`-role turn carrying instructions to the model."""
-
-    model_config = ConfigDict(frozen=True)
-
-    kind: Literal["system"] = "system"
-
-    parts: list[TextPart]
-    """The instruction content, as text parts."""
-
-    @classmethod
-    def from_text(cls, text: str) -> Self:
-        """Construct a system message with a single `TextPart`."""
-
-        return cls(parts=[TextPart(text=text)])
-
-    @property
-    def text(self) -> str | None:
-        """Concatenated text of all parts, or `None` if there are no parts."""
-
-        return "".join(p.text for p in self.parts) if self.parts else None
-
-
 class UserMessage(BaseModel):
     """A `user`-role turn carrying the caller's input to the model."""
 
@@ -216,7 +195,11 @@ class ToolMessage(BaseModel):
 
 
 type Message = Annotated[
-    SystemMessage | UserMessage | AssistantMessage | ToolMessage,
+    UserMessage | AssistantMessage | ToolMessage,
     Field(discriminator="kind"),
 ]
-"""A single turn in the conversation transcript.  Discriminated on `kind`."""
+"""A single turn in the conversation transcript.  Discriminated on `kind`.
+
+The transcript carries no system role: the system prompt is run configuration
+passed to the provider separately, not a conversational turn.
+"""

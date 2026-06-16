@@ -50,7 +50,6 @@ from avior.core.messages import (
     AssistantPart,
     Message,
     StopReason,
-    SystemMessage,
     TextPart,
     ToolCallPart,
     ToolMessage,
@@ -102,30 +101,27 @@ class OpenAIResponsesProvider(Provider):
         self,
         messages: Sequence[Message],
         settings: ModelSettings,
+        *,
         tools: Sequence[Tool[Any, Any, Any]] = (),
+        system_prompt: str | None = None,
     ) -> ProviderResponse:
-        """Send `messages` to OpenAI Responses API and return the assistant's
-        response.
+        """Send the conversation to OpenAI Responses and return the response.
 
         `store=False` is always passed (stateless wire; no server-side
         history).  `temperature` and `max_output_tokens` are forwarded only
         when explicitly set on `settings`.
 
         Args:
-            messages: Conversation transcript.  `SystemMessage`s are lifted
-                out of the transcript and joined (newline-separated) into
-                OpenAI Responses' top-level `instructions` parameter (see
-                `_extract_instructions` for the rationale of this choice over
-                inline `role='system'` items).  Relative order is preserved
-                within each group (system messages keep their order in the
-                joined string; non-system messages keep their order in
-                `input`), but the interleaving between the two groups is lost.
+            messages: Conversation transcript (user / assistant / tool turns).
             settings: Per-call invocation settings.
             tools: Tools to offer the model.  Each is sent as a Responses
                 function tool with its arguments JSON schema as `parameters`
                 (`strict=False`: the schema guides the model but is not
                 grammar-enforced).  `function_call` items in the response are
                 parsed back into `ToolCallPart`s.
+            system_prompt: The system prompt, sent in Responses' top-level
+                `instructions` parameter (which OpenAI folds to the `developer`
+                role for reasoning models), or `None` for no system prompt.
 
         Returns:
             A `ProviderResponse` wrapping the assistant message together with
@@ -145,18 +141,16 @@ class OpenAIResponsesProvider(Provider):
 
         logger.debug("complete: model=%s, messages=%d", settings.model, len(messages))
 
-        instructions, conversation = self._extract_instructions(messages)
-
         # A single avior message can expand to several Responses input items
         # (an assistant turn with tool calls becomes a `message` item plus one
         # `function_call` item per call; a tool turn becomes one or more
         # `function_call_output` items), so the wire input is flat-mapped.
         wire_input: ResponseInputParam = []
-        for m in conversation:
+        for m in messages:
             wire_input.extend(self._to_wire(m))
 
         instructions_param: str | Omit = (
-            instructions if instructions is not None else omit
+            system_prompt if system_prompt is not None else omit
         )
         temperature_param: float | Omit = (
             settings.temperature if settings.temperature is not None else omit
@@ -381,49 +375,10 @@ class OpenAIResponsesProvider(Provider):
         )
 
     @staticmethod
-    def _extract_instructions(
-        messages: Sequence[Message],
-    ) -> tuple[str | None, list[UserMessage | AssistantMessage | ToolMessage]]:
-        """Pull all `SystemMessage`s out of the conversation.
-
-        System content is lifted to the top-level `instructions` parameter
-        rather than passed inline as `role='system'` items in `input` (the API
-        supports both shapes).  The top-level choice
-        - keeps prompt-cache prefixes stable
-        - lets OpenAI fold `instructions` to the `developer` role automatically
-          for reasoning models (no per-model branching in the adapter)
-
-        `instructions` accepts a single string only, so multiple system
-        messages are collected (newline-separated) into one string.  Empty
-        system messages are skipped.
-
-        Returns `(instructions, rest)`; `instructions` is `None` when no
-        non-empty system message is present.
-        """
-
-        texts: list[str] = []
-        rest: list[UserMessage | AssistantMessage | ToolMessage] = []
-        for msg in messages:
-            match msg:
-                case SystemMessage():
-                    if msg.text:
-                        texts.append(msg.text)
-                case UserMessage() | AssistantMessage() | ToolMessage():
-                    rest.append(msg)
-                case _:
-                    assert_never(msg)
-
-        return ("\n\n".join(texts) if texts else None), rest
-
-    @staticmethod
     def _to_wire(
-        message: UserMessage | AssistantMessage | ToolMessage,
+        message: Message,
     ) -> list[ResponseInputItemParam]:
-        """Convert an avior non-system `Message` to Responses input items.
-
-        `SystemMessage`s are not accepted - they are extracted into the
-        top-level `instructions` parameter by `_extract_instructions`
-        upstream.
+        """Convert an avior `Message` to Responses input items.
 
         Returns a list because, unlike a chat-style wire format, the Responses
         API carries tool calls and tool results as their own top-level items

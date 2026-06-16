@@ -1,7 +1,5 @@
 """Tests for `avior.core.testing`."""
 
-from collections.abc import Sequence
-
 import pytest
 from pydantic import BaseModel
 
@@ -30,7 +28,7 @@ async def test_stub_provider_canonical_callable_returns_message_directly() -> No
 
     # GIVEN a stub whose callable returns a pre-built `AssistantMessage`
     response = _assistant_message("hi there")
-    provider = StubProvider(lambda _msgs, _settings: response)
+    provider = StubProvider(lambda _call: response)
 
     # WHEN `complete` is called
     result = await provider.complete([UserMessage.from_text("hello")], _settings())
@@ -43,7 +41,7 @@ async def test_stub_provider_canonical_callable_wraps_string_responses() -> None
     """A `str` from the callable is wrapped as a `ProviderResponse` message."""
 
     # GIVEN a stub whose callable returns a plain string
-    provider = StubProvider(lambda _msgs, _settings: "hi")
+    provider = StubProvider(lambda _call: "hi")
 
     # WHEN `complete` is called
     result = await provider.complete([UserMessage.from_text("hello")], _settings())
@@ -76,7 +74,7 @@ async def test_stub_provider_canonical_callable_awaits_coroutine_results() -> No
     """An awaitable returned from the callable is awaited."""
 
     # GIVEN a stub whose callable is an async function
-    async def async_func(_msgs: Sequence[Message], _settings: ModelSettings) -> str:
+    async def async_func(_call: StubCall) -> str:
         return "async hi"
 
     provider = StubProvider(async_func)
@@ -88,14 +86,14 @@ async def test_stub_provider_canonical_callable_awaits_coroutine_results() -> No
     assert result.message.text == "async hi"
 
 
-async def test_stub_provider_callable_receives_messages_and_settings() -> None:
-    """The callable receives the same `messages` and `settings` by identity."""
+async def test_stub_provider_callable_receives_the_recorded_call() -> None:
+    """The callable receives the same `StubCall` recorded in `.calls`."""
 
-    # GIVEN a stub callable that records its arguments
+    # GIVEN a stub callable that captures the `StubCall` it was handed
     received: list[StubCall] = []
 
-    def func(messages: Sequence[Message], settings: ModelSettings) -> str:
-        received.append(StubCall(messages=messages, settings=settings))
+    def func(call: StubCall) -> str:
+        received.append(call)
         return "ok"
 
     provider = StubProvider(func)
@@ -105,17 +103,18 @@ async def test_stub_provider_callable_receives_messages_and_settings() -> None:
     # WHEN `complete` is called
     await provider.complete(messages, settings)
 
-    # THEN the callable observed the same arguments by identity
+    # THEN the callable saw the call by identity, and it is the recorded one
     assert len(received) == 1
     assert received[0].messages is messages
     assert received[0].settings is settings
+    assert received[0] is provider.calls[-1]
 
 
 async def test_stub_provider_records_each_call_in_order() -> None:
     """Each `complete` invocation is appended to `.calls` in order."""
 
     # GIVEN a stub that always returns the same response
-    provider = StubProvider(lambda _msgs, _settings: "ok")
+    provider = StubProvider(lambda _call: "ok")
 
     # WHEN `complete` is called three times with different messages
     settings = _settings()
@@ -146,13 +145,34 @@ async def test_stub_provider_records_offered_tools() -> None:
 
     # GIVEN a stub and a tool to offer
     tool = _Ping()
-    provider = StubProvider(lambda _msgs, _settings: "ok")
+    provider = StubProvider(lambda _call: "ok")
 
     # WHEN `complete` is called with that tool offered
-    await provider.complete([UserMessage.from_text("hi")], _settings(), [tool])
+    await provider.complete(
+        [UserMessage.from_text("hi")],
+        _settings(),
+        tools=[tool],
+    )
 
     # THEN the offered tools are recorded on the call
     assert provider.calls[-1].tools == [tool]
+
+
+async def test_stub_provider_records_system_prompt() -> None:
+    """`complete` records the `system_prompt` argument it was called with."""
+
+    # GIVEN a stub
+    provider = StubProvider(lambda _call: "ok")
+
+    # WHEN `complete` is called with a system prompt
+    await provider.complete(
+        [UserMessage.from_text("hi")],
+        _settings(),
+        system_prompt="be helpful",
+    )
+
+    # THEN the system prompt is recorded on the call
+    assert provider.calls[-1].system_prompt == "be helpful"
 
 
 async def test_stub_provider_from_responses_returns_responses_in_order() -> None:
@@ -225,8 +245,11 @@ async def test_stub_provider_from_predicates_returns_matching_response() -> None
     # GIVEN a stub with predicates keyed on the last user message text
     provider = StubProvider.from_predicates(
         [
-            (lambda msgs: msgs[-1].text == "ping", "pong"),
-            (lambda msgs: msgs[-1].text == "hello", _assistant_message("hi there")),
+            (lambda call: call.messages[-1].text == "ping", "pong"),
+            (
+                lambda call: call.messages[-1].text == "hello",
+                _assistant_message("hi there"),
+            ),
         ]
     )
     settings = _settings()
@@ -246,8 +269,8 @@ async def test_stub_provider_from_predicates_evaluates_in_order() -> None:
     # GIVEN a stub whose predicates both match the same message
     provider = StubProvider.from_predicates(
         [
-            (lambda _msgs: True, "first"),
-            (lambda _msgs: True, "second"),
+            (lambda _call: True, "first"),
+            (lambda _call: True, "second"),
         ]
     )
 
@@ -263,7 +286,7 @@ async def test_stub_provider_from_predicates_raises_when_no_match() -> None:
 
     # GIVEN a stub whose single predicate matches nothing
     provider = StubProvider.from_predicates(
-        [(lambda msgs: msgs[-1].text == "ping", "pong")]
+        [(lambda call: call.messages[-1].text == "ping", "pong")]
     )
 
     # WHEN `complete` is called with a non-matching message
@@ -276,7 +299,7 @@ async def test_stub_provider_from_predicates_records_call_on_failure() -> None:
     """A call is recorded in `.calls` even when no predicate matches."""
 
     # GIVEN a stub whose predicates never match
-    provider = StubProvider.from_predicates([(lambda _msgs: False, "never")])
+    provider = StubProvider.from_predicates([(lambda _call: False, "never")])
 
     # WHEN `complete` is called and raises
     with pytest.raises(AssertionError):

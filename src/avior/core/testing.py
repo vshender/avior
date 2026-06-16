@@ -1,12 +1,11 @@
 """Test doubles for `avior.core` primitives.
 
-This module is part of the public API. Users can import `StubProvider` to
+This module is part of the public API.  Users can import `StubProvider` to
 test their own agents without making real LLM calls.
 
 `StubProvider` is a stub-and-spy in the xUnit taxonomy: it returns
 caller-programmed responses (stub) and records every invocation (spy) for
-later assertion. It is named "stub", not "fake", because it does not
-implement the underlying LLM contract - it merely replays scripted output.
+later assertion.
 """
 
 from collections.abc import Awaitable, Callable, Sequence
@@ -28,26 +27,14 @@ type StubResponse = str | AssistantMessage | ProviderResponse
   it asserts on.
 """
 
-type StubCallable = Callable[
-    [Sequence[Message], ModelSettings],
-    StubResponse | Awaitable[StubResponse],
-]
-"""The canonical callable form a `StubProvider` dispatches to.
-
-Receives the conversation and the model settings; returns a scripted
-response either synchronously or as an awaitable.
-"""
-
-type StubPredicate = Callable[[Sequence[Message]], bool]
-"""A predicate over the conversation, used by `from_predicates`."""
-
 
 class StubCall(NamedTuple):
-    """A single recorded invocation of a `StubProvider`.
+    """A record of one `StubProvider` invocation - the parameters the call was
+    made with.
 
-    Stored in the order calls were made. Use field access (`.messages`,
-    `.settings`, `.tools`) for clarity; tuple unpacking
-    (`msgs, settings, tools = call`) also works.
+    Appended to `.calls` in call order for later assertion.  Use field access
+    (`.messages`, `.settings`, `.tools`, `.system_prompt`); tuple unpacking
+    (`msgs, settings, tools, system_prompt = call`) also works.
 
     `messages`, `settings`, and `tools` are stored by reference, not by
     snapshot.  If the calling code mutates the same list or settings object
@@ -60,6 +47,18 @@ class StubCall(NamedTuple):
     messages: Sequence[Message]
     settings: ModelSettings
     tools: Sequence[Tool[Any, Any, Any]] = ()
+    system_prompt: str | None = None
+
+
+type StubCallable = Callable[[StubCall], StubResponse | Awaitable[StubResponse]]
+"""The canonical callable form a `StubProvider` dispatches to.
+
+Receives the `StubCall` for the invocation - the parameters the call was made
+with - and returns a scripted response either synchronously or as an awaitable.
+"""
+
+type StubPredicate = Callable[[StubCall], bool]
+"""A predicate over the `StubCall`, used by `from_predicates`."""
 
 
 def _normalize_response(response: StubResponse) -> ProviderResponse:
@@ -77,35 +76,39 @@ def _normalize_response(response: StubResponse) -> ProviderResponse:
     if isinstance(response, str):
         message = AssistantMessage(parts=[TextPart(text=response)], stop_reason="stop")
         return ProviderResponse(message=message)
-
-    if isinstance(response, AssistantMessage):
+    elif isinstance(response, AssistantMessage):
         return ProviderResponse(message=response)
-
-    return response
+    else:
+        return response
 
 
 class StubProvider(Provider):
     """Programmable test double for the `Provider` abstraction.
 
-    Three construction forms cover the common test scenarios. All forms
+    Three construction forms cover the common test scenarios.  All forms
     record their invocations in `.calls` for test assertions.
 
-    1. **Canonical callable** - `StubProvider(lambda msgs, settings: ...)`
-       gives full control over the response, including inspecting the
-       conversation and settings. The callable may be sync or async, and
-       may return any `StubResponse`: a `str` (wrapped as a single-`TextPart`
-       `AssistantMessage`), a fully-formed `AssistantMessage`, or a complete
-       `ProviderResponse` (to script the call metadata).
+    The canonical callable and predicates receive the `StubCall` for the
+    invocation, so dispatch can branch on any parameter the call was made with.
+    A stub is usually written for one agent's scenario, so in practice that
+    branching keys on the messages.
+
+    1. **Canonical callable** - `StubProvider(lambda call: ...)` gives full
+       control over the response from the whole `StubCall`.  The callable may
+       be sync or async, and may return any `StubResponse`: a `str` (wrapped as
+       a single-`TextPart` `AssistantMessage`), a fully-formed
+       `AssistantMessage`, or a complete `ProviderResponse` (to script the call
+       metadata).
 
        ```python
-       def respond(messages: Sequence[Message], _: ModelSettings) -> str:
-           return f"echo: {messages[-1].text}"
+       def respond(call: StubCall) -> str:
+           return f"echo: {call.messages[-1].text}"
 
        provider = StubProvider(respond)
        ```
 
     2. **Sequential canned responses** - `StubProvider.from_responses([...])`
-       returns each entry in order, one per call. Raises `AssertionError`
+       returns each entry in order, one per call.  Raises `AssertionError`
        once exhausted.
 
        ```python
@@ -113,15 +116,14 @@ class StubProvider(Provider):
        ```
 
     3. **Predicate dispatch** - `StubProvider.from_predicates([(pred, resp),
-       ...])` returns the response paired with the first matching
-       predicate. Raises `AssertionError` if no predicate matches. The
-       predicate signature is `Callable[[Sequence[Message]], bool]`; for
-       settings-aware dispatch, use the canonical callable form instead.
+       ...])` returns the response paired with the first matching predicate.
+       Raises `AssertionError` if no predicate matches.  Each predicate is a
+       `Callable[[StubCall], bool]`.
 
        ```python
        provider = StubProvider.from_predicates([
-           (lambda msgs: msgs[-1].text == "ping", "pong"),
-           (lambda msgs: msgs[-1].text == "hello", "hi"),
+           (lambda call: call.messages[-1].text == "ping", "pong"),
+           (lambda call: call.messages[-1].text == "hello", "hi"),
        ])
        ```
 
@@ -133,13 +135,33 @@ class StubProvider(Provider):
        assert provider.calls[-1].messages[-1].text == "hello"
        assert provider.calls[-1].settings.model == "claude-3-5-sonnet"
        ```
+
+    The stub never generates tool calls itself.  To exercise the Runner's
+    tool loop, script a tool call (an `AssistantMessage` with a `ToolCallPart`
+    and `stop_reason="tool_use"`), then the final reply:
+
+       ```python
+       provider = StubProvider.from_responses([
+           AssistantMessage(
+               parts=[
+                   ToolCallPart(
+                       call_id="c1",
+                       tool_name="get_weather",
+                       args={"city": "Paris"},
+                   )
+               ],
+               stop_reason="tool_use",
+           ),
+           "It's sunny in Paris.",
+       ])
+       ```
     """
 
     def __init__(self, func: StubCallable) -> None:
         """Construct a stub from the canonical dispatch callable.
 
         Args:
-            func: Receives `(messages, settings)` and returns a
+            func: Receives the `StubCall` for each invocation and returns a
                 `StubResponse` either directly or as an awaitable.
         """
 
@@ -167,10 +189,7 @@ class StubProvider(Provider):
         snapshot = list(responses)
         index = 0
 
-        def func(
-            _messages: Sequence[Message],
-            _settings: ModelSettings,
-        ) -> StubResponse:
+        def func(_call: StubCall) -> StubResponse:
             nonlocal index
             if index >= len(snapshot):
                 raise AssertionError(
@@ -191,33 +210,27 @@ class StubProvider(Provider):
     ) -> Self:
         """Construct a stub that dispatches by matching the first predicate.
 
-        Predicates receive the conversation only, not the model settings.
-        For settings-aware dispatch (e.g. branching on `settings.model`),
-        use the canonical callable form (`StubProvider(func)`) directly.
-
         Args:
-            pairs: Sequence of `(predicate, response)` pairs. Predicates
-                receive the full message list; first match wins.
+            pairs: Sequence of `(predicate, response)` pairs.  Each predicate
+                receives the `StubCall` (so it can match on any parameter the
+                call was made with); first match wins.
 
         Returns:
             A `StubProvider` whose `complete` evaluates predicates in
-            order and returns the paired response on first match. Raises
+            order and returns the paired response on first match.  Raises
             `AssertionError` if no predicate matches.
         """
 
         snapshot = list(pairs)
 
-        def func(
-            messages: Sequence[Message],
-            _settings: ModelSettings,
-        ) -> StubResponse:
+        def func(call: StubCall) -> StubResponse:
             for predicate, response in snapshot:
-                if predicate(messages):
+                if predicate(call):
                     return response
 
             raise AssertionError(
                 "StubProvider.from_predicates: no predicate matched the "
-                f"incoming conversation of {len(messages)} message(s)."
+                f"incoming conversation of {len(call.messages)} message(s)."
             )
 
         return cls(func)
@@ -226,24 +239,37 @@ class StubProvider(Provider):
         self,
         messages: Sequence[Message],
         settings: ModelSettings,
+        *,
         tools: Sequence[Tool[Any, Any, Any]] = (),
+        system_prompt: str | None = None,
     ) -> ProviderResponse:
         """Record the call, dispatch, and return the scripted response.
 
         Args:
             messages: Conversation transcript passed to the stub.
             settings: Per-call model invocation settings.
-            tools: Recorded on the `StubCall` for assertions, but does not
-                affect the response - the stub replays scripted output
-                regardless (script a `ToolCallPart` to exercise tool dispatch).
+            tools: Tools offered to the model.
+            system_prompt: The system prompt for the call.
 
         Returns:
             The scripted response, normalized to a `ProviderResponse`.
+
+        The call is recorded as a `StubCall` in `.calls`, and that same
+        `StubCall` is passed to the dispatch callable, which may branch on any
+        of its fields.  The stub never generates tool calls itself - to drive
+        the Runner's tool loop, script a response `AssistantMessage` whose
+        parts include a `ToolCallPart`.
         """
 
-        self.calls.append(StubCall(messages=messages, settings=settings, tools=tools))
+        call = StubCall(
+            messages=messages,
+            settings=settings,
+            tools=tools,
+            system_prompt=system_prompt,
+        )
+        self.calls.append(call)
 
-        result = self._func(messages, settings)
+        result = self._func(call)
         if isawaitable(result):
             result = await result
 
