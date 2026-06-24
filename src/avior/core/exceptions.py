@@ -91,12 +91,21 @@ class ProviderHTTPError(ProviderError):
 
 
 class ProviderResponseValidationError(ProviderError):
-    """The provider returned a successful response that could not be decoded.
+    """The provider returned a successful response avior could not decode or map
+    into the canonical message shape.
 
-    Indicates a schema mismatch between the provider's wire format and the SDK's
-    response model - typically because the provider rolled out a new response
-    shape the installed SDK doesn't yet understand.  The fix is usually to
-    upgrade the SDK.
+    Two causes:
+
+    - a schema mismatch between the provider's wire format and the provider
+      SDK's response model - typically because the provider rolled out a new
+      response shape the installed SDK doesn't yet understand (fix: upgrade the
+      SDK);
+    - the response decoded fine but carries content avior does not yet model in
+      the canonical IR - a content kind the adapter has no mapping for (fix:
+      extend avior to handle it).
+
+    Either way the transport call succeeded; the failure is in turning the
+    response into avior's `Message`.
     """
 
 
@@ -124,14 +133,15 @@ class MaxTokensExceededError(AgentRunError):
 
 
 class ContentFilterError(AgentRunError):
-    """The provider's content filter blocked the response.
+    """The provider's content filter blocked the exchange.
 
-    The filter is a server-side moderation classifier run by the provider
-    (OpenAI's safety system, Azure OpenAI's configurable content filter) that
-    screens the model's generated output against policy and zeroes it out on
-    violation.  The HTTP call still succeeds at the transport level, but no
-    usable content reaches the caller.  Surfaces on OpenAI's
-    `incomplete_details.reason == "content_filter"`.
+    The filter is a server-side moderation classifier run by the provider that
+    screens content against policy and zeroes it out on a violation.  It can
+    block either the prompt before generation or the generated response.  The
+    HTTP call still succeeds at the transport level, but no usable content
+    reaches the caller.  Surfaces across providers - for example OpenAI's
+    `incomplete_details.reason == "content_filter"`, or Gemini's safety /
+    recitation finish or a prompt blocked before generation.
 
     Distinct from `ModelRefusalError`: the filter is moderation infrastructure
     intervening *between* the model and the caller, not the model itself
@@ -165,6 +175,23 @@ class ModelRefusalError(AgentRunError):
 
         super().__init__(refusal_text)
         self.refusal_text = refusal_text
+
+
+class UnexpectedModelBehaviorError(AgentRunError):
+    """The model terminated abnormally without a usable response.
+
+    Surfaces on the canonical `"error"` stop reason - a provider-reported
+    abnormal termination where the model produced neither usable content nor a
+    valid tool call (for example Gemini's `MALFORMED_FUNCTION_CALL` /
+    `UNEXPECTED_TOOL_CALL`: the model tried to call a tool but produced
+    malformed tool-call data).  The HTTP call succeeded and the response
+    decoded, so this is a run failure, not a `ProviderError`.
+
+    Distinct from `ContentFilterError` / `ModelRefusalError`, which are specific
+    deliberate outcomes; this is the catch-all for "the model misbehaved".  The
+    provider-specific reason is not carried on the canonical stop reason; a
+    provider may log it.
+    """
 
 
 class AviorUsageError(AviorError):

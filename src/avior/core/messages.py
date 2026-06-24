@@ -16,7 +16,14 @@ from typing import Annotated, Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field
 
-type StopReason = Literal["stop", "tool_use", "max_tokens", "content_filter", "refusal"]
+type StopReason = Literal[
+    "stop",
+    "tool_use",
+    "max_tokens",
+    "content_filter",
+    "refusal",
+    "error",
+]
 """Canonical reason a model stopped producing output.
 
 Normalized across providers so the orchestrator can apply a uniform policy
@@ -28,12 +35,17 @@ without branching on vendor specifics:
   before continuing the run.
 - `"max_tokens"` - hit the configured token budget; output likely truncated.
 - `"content_filter"` - the provider's server-side moderation filter blocked
-  the response (a classifier layered between the model and the caller that
-  screens generated output and zeroes it out on policy violation).
+  the exchange (a classifier layered around the model that screens content and
+  zeroes it out on policy violation).  This can block either the prompt before
+  generation or the generated response.
 - `"refusal"` - the model itself declined to answer (the refusal text is present
   in `parts`).  Distinct from `"content_filter"`: the model produced output
   explaining why it refused, the response is "successful" at the transport level
   but not the requested answer.
+- `"error"` - the model terminated abnormally without a usable response (e.g. it
+  tried to call a tool but produced a malformed or unexpected call).  The
+  transport call succeeded, so this is a model/run failure, not a transport one;
+  the orchestrator aborts the run.
 """
 
 

@@ -36,8 +36,11 @@ anthropic = [
 openai = [
     "openai>=1.50",
 ]
+gemini = [
+    "google-genai>=2.7.0",
+]
 all = [
-    "avior[anthropic,openai]",
+    "avior[anthropic,openai,gemini]",
 ]
 
 [build-system]

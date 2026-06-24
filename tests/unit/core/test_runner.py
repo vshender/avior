@@ -7,6 +7,7 @@ from avior.core.exceptions import (
     ContentFilterError,
     MaxTokensExceededError,
     ModelRefusalError,
+    UnexpectedModelBehaviorError,
 )
 from avior.core.messages import (
     AssistantMessage,
@@ -241,6 +242,24 @@ async def test_runner_run_raises_on_refusal_stop_reason() -> None:
     with pytest.raises(ModelRefusalError) as exc_info:
         await runner.run(agent, "hello")
     assert exc_info.value.refusal_text == refusal_text
+
+
+async def test_runner_run_raises_on_error_stop_reason() -> None:
+    """`Runner.run` raises `UnexpectedModelBehaviorError` on `"error"`."""
+
+    # GIVEN an agent and a runner whose provider returns a message marked
+    # `error` (an abnormal termination, e.g. a malformed tool call)
+    agent = Agent(
+        instructions="you are helpful",
+        model_settings=ModelSettings(model="test-model"),
+    )
+    errored = AssistantMessage(parts=[], stop_reason="error")
+    runner = Runner(provider=StubProvider.from_responses([errored]))
+
+    # WHEN `Runner.run` is invoked
+    # THEN it raises `UnexpectedModelBehaviorError`
+    with pytest.raises(UnexpectedModelBehaviorError):
+        await runner.run(agent, "hello")
 
 
 async def test_runner_run_accepts_normal_stop_reason() -> None:

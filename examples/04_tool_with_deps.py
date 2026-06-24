@@ -12,8 +12,8 @@ reads dependencies, so it is `Tool[..., Deps]` and its context is
 `RunContext[Deps]` - which is what makes `ctx.deps` a typed `Deps`.
 
 The dependency is a tiny in-memory account store, so the model can answer a
-balance question it could not know on its own.  Requires `ANTHROPIC_API_KEY` in
-the environment.
+balance question it could not know on its own.  Requires `GOOGLE_API_KEY` (or
+`GEMINI_API_KEY`) in the environment.
 
 Run with: `uv run python examples/04_tool_with_deps.py`
 """
@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from pydantic import BaseModel
 
 from avior.core import Agent, ModelSettings, RunContext, Runner, Tool
-from avior.providers.anthropic import AnthropicProvider
+from avior.providers.gemini import GeminiProvider
 
 
 @dataclass
@@ -67,14 +67,14 @@ class GetBalance(Tool[BalanceArgs, str, Deps]):
 async def main() -> None:
     agent = Agent(
         instructions="You are a banking assistant.  Use tools to look up data.",
-        model_settings=ModelSettings(model="claude-haiku-4-5-20251001"),
+        model_settings=ModelSettings(model="gemini-2.5-flash"),
         tools=[GetBalance()],
         deps_type=Deps,
     )
     # The dependency value is supplied per run, not baked into the agent.
     deps = Deps(balances={"acc-001": 123_45, "acc-002": 67_00})
     # `async with` owns the provider's lifecycle; the runner only borrows it.
-    async with AnthropicProvider() as provider:
+    async with GeminiProvider() as provider:
         runner = Runner(provider=provider)
         result = await runner.run(
             agent, "What is the balance of account acc-001?", deps=deps

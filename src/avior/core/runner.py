@@ -15,6 +15,7 @@ from avior.core.exceptions import (
     MaxTokensExceededError,
     MissingDependenciesError,
     ModelRefusalError,
+    UnexpectedModelBehaviorError,
 )
 from avior.core.messages import (
     AssistantMessage,
@@ -144,6 +145,8 @@ class Runner:
             ContentFilterError: An external content filter blocked the response.
             MaxTokensExceededError: Output was truncated by the token budget.
             ModelRefusalError: The model itself declined to answer.
+            UnexpectedModelBehaviorError: The model terminated abnormally
+                without a usable response (the `"error"` stop reason).
             MaxIterationsExceeded: The loop hit `max_iter` without finishing.
         """
 
@@ -260,6 +263,11 @@ def _raise_for_error_stop(message: AssistantMessage, settings: ModelSettings) ->
 
         case "refusal":
             raise ModelRefusalError(message.text or "")
+
+        case "error":
+            raise UnexpectedModelBehaviorError(
+                "Model terminated abnormally without a usable response."
+            )
 
         case "stop" | "tool_use":
             pass
