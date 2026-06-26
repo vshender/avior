@@ -17,13 +17,16 @@ from openai import (
 from openai.types.responses import (
     Response,
     ResponseFunctionToolCall,
+    ResponseFunctionWebSearch,
     ResponseOutputItem,
     ResponseOutputMessage,
     ResponseOutputRefusal,
     ResponseOutputText,
+    ResponseReasoningItem,
     ResponseUsage,
 )
 from openai.types.responses.response import IncompleteDetails
+from openai.types.responses.response_function_web_search import ActionSearch
 from openai.types.responses.response_usage import (
     InputTokensDetails,
     OutputTokensDetails,
@@ -40,6 +43,7 @@ from avior.core.exceptions import (
 from avior.core.messages import (
     AssistantMessage,
     Message,
+    StopReason,
     TextPart,
     ToolCallPart,
     ToolMessage,
@@ -123,6 +127,40 @@ def _incomplete_response(
         tools=[],
         status="incomplete",
         incomplete_details=IncompleteDetails(reason=reason),
+    )
+
+
+def _status_response(
+    status: Literal["failed", "cancelled", "queued", "in_progress"],
+) -> Response:
+    """Build an empty `Response` with the given status."""
+
+    return Response(
+        id="resp_test",
+        object="response",
+        created_at=0.0,
+        model="gpt-test",
+        output=[],
+        parallel_tool_calls=False,
+        tool_choice="auto",
+        tools=[],
+        status=status,
+    )
+
+
+def _response_with_output(output: list[ResponseOutputItem]) -> Response:
+    """Build a completed `Response` carrying the given output items."""
+
+    return Response(
+        id="resp_test",
+        object="response",
+        created_at=0.0,
+        model="gpt-test",
+        output=output,
+        parallel_tool_calls=False,
+        tool_choice="auto",
+        tools=[],
+        status="completed",
     )
 
 
@@ -259,9 +297,9 @@ async def test_provider_prefers_explicit_client_over_api_key() -> None:
 async def test_complete_returns_assistant_message_parsed_from_response() -> None:
     """`complete` returns the assistant message decoded from the response."""
 
-    # GIVEN a mock client returning a single-text-item assistant message
-    mock_client = _mock_client_returning(_response("Hi!"))
-    provider = _provider(mock_client)
+    # GIVEN a response with a single text item
+    response = _response("Hi!")
+    provider = _provider(_mock_client_returning(response))
 
     # WHEN `complete` is awaited
     result = await provider.complete([UserMessage.from_text("hello")], _settings())
@@ -304,8 +342,7 @@ async def test_complete_omits_system_prompt_when_none() -> None:
     await provider.complete([UserMessage.from_text("hi")], _settings())
 
     # THEN the `instructions` kwarg is the `omit` sentinel
-    kwargs = mock_client.responses.create.call_args.kwargs
-    assert kwargs["instructions"] is omit
+    assert mock_client.responses.create.call_args.kwargs["instructions"] is omit
 
 
 async def test_complete_forwards_explicit_max_tokens_and_temperature() -> None:
@@ -343,8 +380,7 @@ async def test_complete_omits_max_output_tokens_when_unset() -> None:
     await provider.complete([UserMessage.from_text("hi")], settings)
 
     # THEN the `max_output_tokens` kwarg is the `omit` sentinel
-    kwargs = mock_client.responses.create.call_args.kwargs
-    assert kwargs["max_output_tokens"] is omit
+    assert mock_client.responses.create.call_args.kwargs["max_output_tokens"] is omit
 
 
 async def test_complete_omits_temperature_when_unset() -> None:
@@ -359,8 +395,7 @@ async def test_complete_omits_temperature_when_unset() -> None:
     await provider.complete([UserMessage.from_text("hi")], settings)
 
     # THEN the `temperature` kwarg is the `omit` sentinel
-    kwargs = mock_client.responses.create.call_args.kwargs
-    assert kwargs["temperature"] is omit
+    assert mock_client.responses.create.call_args.kwargs["temperature"] is omit
 
 
 async def test_complete_passes_store_false() -> None:
@@ -374,16 +409,15 @@ async def test_complete_passes_store_false() -> None:
     await provider.complete([UserMessage.from_text("hi")], _settings())
 
     # THEN the `store` kwarg is `False`, so no server-side history is created
-    kwargs = mock_client.responses.create.call_args.kwargs
-    assert kwargs["store"] is False
+    assert mock_client.responses.create.call_args.kwargs["store"] is False
 
 
 async def test_complete_maps_each_response_text_item_to_a_part() -> None:
     """`complete` maps each response text item to its own `TextPart`."""
 
-    # GIVEN a mock client returning a response with two text items
-    mock_client = _mock_client_returning(_response("hello ", "world"))
-    provider = _provider(mock_client)
+    # GIVEN a response with two text items
+    response = _response("hello ", "world")
+    provider = _provider(_mock_client_returning(response))
 
     # WHEN `complete` is awaited
     result = await provider.complete([UserMessage.from_text("hi")], _settings())
@@ -395,15 +429,68 @@ async def test_complete_maps_each_response_text_item_to_a_part() -> None:
 async def test_complete_returns_empty_parts_when_response_output_is_empty() -> None:
     """`complete` returns `parts=[]` when the response has no output items."""
 
-    # GIVEN a mock client returning a response with empty output (zero items)
-    mock_client = _mock_client_returning(_response())
-    provider = _provider(mock_client)
+    # GIVEN a response with empty output (zero items)
+    response = _response()
+    provider = _provider(_mock_client_returning(response))
 
     # WHEN `complete` is awaited
     result = await provider.complete([UserMessage.from_text("hi")], _settings())
 
     # THEN the result has an empty parts list (not a single empty `TextPart`)
     assert result.message.parts == []
+
+
+async def test_complete_skips_reasoning_item_keeping_other_output() -> None:
+    """A reasoning item is skipped, with the rest of the output still parsed."""
+
+    # GIVEN a response carrying a reasoning item before a text message
+    response = _response_with_output(
+        [
+            ResponseReasoningItem(id="rs_1", type="reasoning", summary=[]),
+            ResponseOutputMessage(
+                id="msg_test",
+                type="message",
+                role="assistant",
+                status="completed",
+                content=[
+                    ResponseOutputText(type="output_text", text="Hi!", annotations=[])
+                ],
+            ),
+        ]
+    )
+    provider = _provider(_mock_client_returning(response))
+
+    # WHEN `complete` is awaited
+    result = await provider.complete([UserMessage.from_text("hi")], _settings())
+
+    # THEN the reasoning item is skipped and the message text survives
+    assert result.message.text == "Hi!"
+
+
+async def test_complete_raises_on_unsupported_output_item() -> None:
+    """An output item avior cannot represent raises rather than dropping.
+
+    A built-in tool item (here a web-search call) carries output the adapter
+    does not map, so it fails loud instead of returning a misleading success.
+    """
+
+    # GIVEN a response carrying a web-search call the adapter does not map
+    response = _response_with_output(
+        [
+            ResponseFunctionWebSearch(
+                id="ws_1",
+                type="web_search_call",
+                status="completed",
+                action=ActionSearch(type="search", query="x"),
+            )
+        ]
+    )
+    provider = _provider(_mock_client_returning(response))
+
+    # WHEN `complete` is awaited
+    # THEN `ProviderResponseValidationError` is raised
+    with pytest.raises(ProviderResponseValidationError):
+        await provider.complete([UserMessage.from_text("hi")], _settings())
 
 
 # Call-metadata mapping tests
@@ -413,7 +500,7 @@ async def test_complete_returns_empty_parts_when_response_output_is_empty() -> N
 async def test_complete_maps_usage_ids_and_model_onto_provider_response() -> None:
     """`complete` maps OpenAI usage, response id, and model onto the wrapper."""
 
-    # GIVEN a mock client returning a completed response with the call metadata
+    # GIVEN a response carrying the call metadata (usage, id, and served model)
     usage = ResponseUsage(
         input_tokens=11,
         output_tokens=7,
@@ -421,27 +508,29 @@ async def test_complete_maps_usage_ids_and_model_onto_provider_response() -> Non
         input_tokens_details=InputTokensDetails(cached_tokens=4),
         output_tokens_details=OutputTokensDetails(reasoning_tokens=3),
     )
-    provider = _provider(_mock_client_returning(_response("hi", usage=usage)))
+    response = _response("hi", usage=usage)
+    provider = _provider(_mock_client_returning(response))
 
     # WHEN `complete` is awaited
     result = await provider.complete([UserMessage.from_text("hi")], _settings())
 
     # THEN usage is normalized: OpenAI's input/output already include their
     # cache/reasoning sub-slices, so the totals are used as-is and the nested
-    # details surface as sub-slices
+    # details surface as sub-slices; cache_write is 0 (OpenAI has no separate
+    # cache-write counter); the derived total equals OpenAI's own reported total
+    # (confirming input/output already include their sub-slices)
     assert result.usage is not None
     assert result.usage.input_tokens == 11
     assert result.usage.output_tokens == 7
-    assert result.usage.cache_read_tokens == 4
     assert result.usage.reasoning_tokens == 3
-
-    # AND cache_write is 0: OpenAI has no separate cache-write counter
+    assert result.usage.cache_read_tokens == 4
     assert result.usage.cache_write_tokens == 0
-
-    # AND the derived total equals OpenAI's own reported total, confirming the
-    # convention (input/output already include their sub-slices)
     assert result.usage.total_tokens == 18
     assert result.usage.total_tokens == usage.total_tokens
+
+    # AND the provider-native usage is preserved beside the normalized counts
+    assert result.raw_usage is not None
+    assert result.raw_usage["input_tokens"] == 11
 
     # AND the response id, served model, and provider name are populated
     assert result.response_id == "resp_test"
@@ -452,14 +541,16 @@ async def test_complete_maps_usage_ids_and_model_onto_provider_response() -> Non
 async def test_complete_maps_absent_usage_to_none() -> None:
     """`complete` yields `usage=None` when the response carries no usage."""
 
-    # GIVEN a mock client returning a response with no usage attached
-    provider = _provider(_mock_client_returning(_response("hi")))
+    # GIVEN a response with no usage attached
+    response = _response("hi")
+    provider = _provider(_mock_client_returning(response))
 
     # WHEN `complete` is awaited
     result = await provider.complete([UserMessage.from_text("hi")], _settings())
 
-    # THEN the wrapper's usage is None (not a zero-filled Usage)
+    # THEN usage and raw usage are both `None` (not a zero-filled `Usage`)
     assert result.usage is None
+    assert result.raw_usage is None
 
 
 async def test_complete_warns_when_provider_total_diverges_from_derived(
@@ -467,8 +558,7 @@ async def test_complete_warns_when_provider_total_diverges_from_derived(
 ) -> None:
     """A provider total that disagrees with input+output logs a warning."""
 
-    # GIVEN a mock client returning a response whose `total_tokens` contradicts
-    # input+output
+    # GIVEN a response whose `total_tokens` contradicts input+output
     response = _response(
         "hi",
         usage=ResponseUsage(
@@ -512,7 +602,8 @@ async def test_complete_translates_api_status_error_to_http_error() -> None:
         response=_http_response(429),
         body=None,
     )
-    provider = _provider(_mock_client_raising(openai_error))
+    mock_client = _mock_client_raising(openai_error)
+    provider = _provider(mock_client)
 
     # WHEN `complete` is invoked
     # THEN `ProviderHTTPError` is raised with the HTTP status, and the original
@@ -533,7 +624,8 @@ async def test_complete_translates_response_validation_error() -> None:
         body=None,
         message="schema mismatch",
     )
-    provider = _provider(_mock_client_raising(openai_error))
+    mock_client = _mock_client_raising(openai_error)
+    provider = _provider(mock_client)
 
     # WHEN `complete` is invoked
     # THEN `ProviderResponseValidationError` is raised, with the original
@@ -549,7 +641,8 @@ async def test_complete_translates_connection_error() -> None:
     # GIVEN a mock client raising `APIConnectionError` (network failed before
     # an HTTP response was received)
     openai_error = APIConnectionError(request=_http_request())
-    provider = _provider(_mock_client_raising(openai_error))
+    mock_client = _mock_client_raising(openai_error)
+    provider = _provider(mock_client)
 
     # WHEN `complete` is invoked
     # THEN `ProviderConnectionError` is raised with the original exception
@@ -565,7 +658,8 @@ async def test_complete_translates_timeout_as_connection_error() -> None:
     # GIVEN a mock client raising `APITimeoutError` (subclass of
     # `APIConnectionError`)
     openai_error = APITimeoutError(request=_http_request())
-    provider = _provider(_mock_client_raising(openai_error))
+    mock_client = _mock_client_raising(openai_error)
+    provider = _provider(mock_client)
 
     # WHEN `complete` is invoked
     # THEN `ProviderConnectionError` is raised (timeouts surface as
@@ -581,7 +675,8 @@ async def test_complete_translates_other_openai_errors_to_provider_error() -> No
     # GIVEN a mock client raising a generic `OpenAIError` (not in the
     # `APIError` family that the specific handlers catch)
     openai_error = OpenAIError("unexpected SDK failure")
-    provider = _provider(_mock_client_raising(openai_error))
+    mock_client = _mock_client_raising(openai_error)
+    provider = _provider(mock_client)
 
     # WHEN `complete` is invoked
     # THEN `ProviderError` (the exact base class, not a subclass) is raised
@@ -599,8 +694,9 @@ async def test_complete_translates_other_openai_errors_to_provider_error() -> No
 async def test_complete_sets_stop_reason_stop_on_normal_completion() -> None:
     """`stop_reason="stop"` is set on a normal completed response."""
 
-    # GIVEN a mock client returning a normal completed response
-    provider = _provider(_mock_client_returning(_response("Hi!")))
+    # GIVEN a normal completed response
+    response = _response("Hi!")
+    provider = _provider(_mock_client_returning(response))
 
     # WHEN `complete` is awaited
     result = await provider.complete([UserMessage.from_text("hi")], _settings())
@@ -609,45 +705,111 @@ async def test_complete_sets_stop_reason_stop_on_normal_completion() -> None:
     assert result.message.stop_reason == "stop"
 
 
-async def test_complete_maps_max_output_tokens_to_max_tokens_stop_reason() -> None:
-    """`incomplete_details.reason="max_output_tokens"` -> `"max_tokens"`."""
+@pytest.mark.parametrize(
+    ("reason", "expected_stop_reason"),
+    [
+        ("max_output_tokens", "max_tokens"),
+        ("content_filter", "content_filter"),
+    ],
+    ids=["max_output_tokens", "content_filter"],
+)
+async def test_complete_maps_incomplete_reason_to_stop_reason(
+    reason: Literal["max_output_tokens", "content_filter"],
+    expected_stop_reason: StopReason,
+) -> None:
+    """An `incomplete_details.reason` maps to its canonical `StopReason`."""
 
-    # GIVEN a mock client returning a response truncated at max-tokens
-    provider = _provider(
-        _mock_client_returning(_incomplete_response("max_output_tokens"))
-    )
-
-    # WHEN `complete` is awaited
-    result = await provider.complete([UserMessage.from_text("hi")], _settings())
-
-    # THEN the canonical `stop_reason` is `"max_tokens"`
-    assert result.message.stop_reason == "max_tokens"
-
-
-async def test_complete_maps_content_filter_to_content_filter_stop_reason() -> None:
-    """`incomplete_details.reason="content_filter"` -> `"content_filter"`."""
-
-    # GIVEN a mock client returning an incomplete response due to content filter
-    provider = _provider(_mock_client_returning(_incomplete_response("content_filter")))
+    # GIVEN an incomplete response carrying the given reason
+    response = _incomplete_response(reason)
+    provider = _provider(_mock_client_returning(response))
 
     # WHEN `complete` is awaited
     result = await provider.complete([UserMessage.from_text("hi")], _settings())
 
-    # THEN the canonical `stop_reason` is `"content_filter"`
-    assert result.message.stop_reason == "content_filter"
+    # THEN it maps to the expected canonical stop reason
+    assert result.message.stop_reason == expected_stop_reason
+
+
+@pytest.mark.parametrize(
+    "status",
+    ["failed", "cancelled", "queued", "in_progress"],
+    ids=["failed", "cancelled", "queued", "in_progress"],
+)
+async def test_complete_maps_abnormal_status_to_error(
+    status: Literal["failed", "cancelled", "queued", "in_progress"],
+) -> None:
+    """A failed / cancelled / non-terminal status maps to `"error"`.
+
+    The body decoded fine, but the response carries no usable result, so it must
+    surface as the canonical `"error"` (a run failure) rather than a successful
+    empty stop.
+    """
+
+    # GIVEN a response carrying an abnormal status
+    response = _status_response(status)
+    provider = _provider(_mock_client_returning(response))
+
+    # WHEN `complete` is awaited
+    result = await provider.complete([UserMessage.from_text("hi")], _settings())
+
+    # THEN the canonical `stop_reason` is `"error"`, not `"stop"`
+    assert result.message.stop_reason == "error"
 
 
 async def test_complete_maps_refusal_content_part_to_refusal_stop_reason() -> None:
     """A `ResponseOutputRefusal` content part maps to canonical `"refusal"`."""
 
-    # GIVEN a mock client returning a completed response carrying a refusal part
-    provider = _provider(_mock_client_returning(_refusal_response("I can't help.")))
+    # GIVEN a completed response carrying a refusal part
+    response = _refusal_response("I can't help.")
+    provider = _provider(_mock_client_returning(response))
 
     # WHEN `complete` is awaited
     result = await provider.complete([UserMessage.from_text("hi")], _settings())
 
     # THEN the canonical `stop_reason` is `"refusal"` and the refusal text
     # is preserved in `parts`
+    assert result.message.stop_reason == "refusal"
+    assert result.message.text == "I can't help."
+
+
+async def test_complete_refusal_overrides_text_when_both_present() -> None:
+    """When the response holds both text and a refusal, the refusal wins: the
+    stop reason is `"refusal"` and the partial text is dropped.
+    """
+
+    # GIVEN a completed response whose message holds a text part followed by a
+    # refusal part (rare, but possible in non-streaming output)
+    response = Response(
+        id="resp_test",
+        object="response",
+        created_at=0.0,
+        model="gpt-test",
+        output=[
+            ResponseOutputMessage(
+                id="msg_test",
+                type="message",
+                role="assistant",
+                status="completed",
+                content=[
+                    ResponseOutputText(
+                        type="output_text", text="Here is how to", annotations=[]
+                    ),
+                    ResponseOutputRefusal(type="refusal", refusal="I can't help."),
+                ],
+            )
+        ],
+        parallel_tool_calls=False,
+        tool_choice="auto",
+        tools=[],
+        status="completed",
+    )
+    provider = _provider(_mock_client_returning(response))
+
+    # WHEN `complete` is awaited
+    result = await provider.complete([UserMessage.from_text("hi")], _settings())
+
+    # THEN the refusal is the authoritative final word: it sets the stop reason
+    # and replaces the partial text
     assert result.message.stop_reason == "refusal"
     assert result.message.text == "I can't help."
 
@@ -659,7 +821,7 @@ async def test_complete_maps_refusal_content_part_to_refusal_stop_reason() -> No
 async def test_complete_parses_function_call_into_tool_call_part() -> None:
     """A response `function_call` item decodes into a `ToolCallPart`."""
 
-    # GIVEN a provider whose mock client returns a function-call response
+    # GIVEN a function-call response
     response = _function_call_response("call_1", "get_weather", '{"city": "Paris"}')
     provider = _provider(_mock_client_returning(response))
 
@@ -676,8 +838,7 @@ async def test_complete_parses_function_call_into_tool_call_part() -> None:
 async def test_complete_parses_empty_arguments_into_empty_dict() -> None:
     """An empty `arguments` string decodes into an empty args dict."""
 
-    # GIVEN a provider whose mock client returns a function-call response with
-    # an empty arguments string
+    # GIVEN a function-call response with an empty arguments string
     response = _function_call_response("call_1", "ping", "")
     provider = _provider(_mock_client_returning(response))
 
@@ -693,8 +854,7 @@ async def test_complete_parses_empty_arguments_into_empty_dict() -> None:
 async def test_complete_raises_validation_error_on_malformed_arguments() -> None:
     """Non-JSON `arguments` map to `ProviderResponseValidationError`."""
 
-    # GIVEN a provider whose mock client returns a function-call response with
-    # arguments that are not valid JSON
+    # GIVEN a function-call response whose arguments are not valid JSON
     response = _function_call_response("call_1", "get_weather", "not json")
     provider = _provider(_mock_client_returning(response))
 
@@ -707,7 +867,7 @@ async def test_complete_raises_validation_error_on_malformed_arguments() -> None
 async def test_complete_maps_function_call_to_tool_use_stop_reason() -> None:
     """A response carrying a `function_call` maps to canonical `"tool_use"`."""
 
-    # GIVEN a provider whose mock client returns a function-call response
+    # GIVEN a function-call response
     response = _function_call_response("call_1", "get_weather", '{"city": "Paris"}')
     provider = _provider(_mock_client_returning(response))
 
@@ -726,9 +886,8 @@ async def test_complete_skips_decoding_truncated_tool_call_on_max_tokens() -> No
     wins and the truncated call is dropped rather than decoded.
     """
 
-    # GIVEN a provider whose mock client returns an incomplete
-    # (max_output_tokens) response with a function_call that was cut off
-    # mid-arguments, leaving invalid JSON
+    # GIVEN an incomplete (max_output_tokens) response with a `function_call`
+    # cut off mid-arguments, leaving invalid JSON
     truncated = ResponseFunctionToolCall(
         type="function_call",
         call_id="call_1",
@@ -755,9 +914,8 @@ async def test_complete_skips_truncated_tool_call_on_reasonless_incomplete() -> 
     response maps to a plain `"stop"`.
     """
 
-    # GIVEN a provider whose mock client returns an incomplete (no reason)
-    # response with a function_call that was cut off mid-arguments, leaving
-    # invalid JSON
+    # GIVEN an incomplete (no reason) response with a `function_call` cut off
+    # mid-arguments, leaving invalid JSON
     truncated = ResponseFunctionToolCall(
         type="function_call",
         call_id="call_1",
@@ -778,15 +936,16 @@ async def test_complete_skips_truncated_tool_call_on_reasonless_incomplete() -> 
 async def test_complete_sends_tools_with_name_description_and_schema() -> None:
     """Each offered tool is sent as a non-strict function tool with a schema."""
 
-    # GIVEN a provider and an offered tool
+    # GIVEN a mock client and an offered tool
     mock_client = _mock_client_returning(_response("ok"))
     provider = _provider(mock_client)
+    tool = _Weather()
 
     # WHEN `complete` is invoked with that tool
     await provider.complete(
         [UserMessage.from_text("hi")],
         _settings(),
-        tools=[_Weather()],
+        tools=[tool],
     )
 
     # THEN the OpenAI SDK call carries the tool's name, description, and args
@@ -806,7 +965,7 @@ async def test_complete_sends_tools_with_name_description_and_schema() -> None:
 async def test_complete_omits_tools_when_none_offered() -> None:
     """No offered tools means the `tools` kwarg is the `omit` sentinel."""
 
-    # GIVEN a provider and no tools
+    # GIVEN a mock client and no tools offered
     mock_client = _mock_client_returning(_response("ok"))
     provider = _provider(mock_client)
 

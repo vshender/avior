@@ -22,6 +22,8 @@ pytestmark = pytest.mark.skipif(
     reason="OPENAI_API_KEY not set",
 )
 
+_MODEL = "gpt-4.1-nano"
+
 
 class _MagicNumberArgs(BaseModel):
     """Arguments for the `_MagicNumber` tool."""
@@ -61,10 +63,7 @@ async def test_runner_run_against_openai_returns_non_empty_text(
     # GIVEN an agent and a runner using the real OpenAI Responses provider
     agent = Agent(
         instructions="Reply with one short word.",
-        model_settings=ModelSettings(
-            model="gpt-4.1-nano",
-            max_tokens=256,
-        ),
+        model_settings=ModelSettings(model=_MODEL, max_tokens=256),
     )
 
     # WHEN we run a trivial prompt
@@ -89,10 +88,7 @@ async def test_runner_run_raises_max_tokens_exceeded_against_openai(
     # to trigger truncation for a long-story prompt.)
     agent = Agent(
         instructions="Write a long story.",
-        model_settings=ModelSettings(
-            model="gpt-4.1-nano",
-            max_tokens=16,
-        ),
+        model_settings=ModelSettings(model=_MODEL, max_tokens=16),
     )
 
     # WHEN `Runner.run` is invoked
@@ -106,10 +102,10 @@ async def test_runner_run_against_openai_calls_a_tool_end_to_end(
 ) -> None:
     """`Runner.run` drives a full tool round-trip against real OpenAI.
 
-    Exercises the wire contract that mocks cannot: OpenAI accepts our function
-    tool definition, returns a `function_call`, accepts the echoed
-    `function_call` plus `function_call_output` items on the continuation
-    request, and produces a final answer relaying the tool's result.
+    Exercises the wire contract that mocks cannot: OpenAI accepts our tool
+    declaration, returns a `function_call`, accepts the echoed `function_call`
+    plus `function_call_output` items on the continuation request, and produces
+    a final answer relaying the tool's result.
     """
 
     # GIVEN an agent offered a tool whose result the model cannot otherwise know
@@ -119,7 +115,7 @@ async def test_runner_run_against_openai_calls_a_tool_end_to_end(
             "When asked for a city's magic number, you must call the "
             "get_magic_number tool, then state the number it returns."
         ),
-        model_settings=ModelSettings(model="gpt-4.1-nano", max_tokens=256),
+        model_settings=ModelSettings(model=_MODEL, max_tokens=256),
         tools=[tool],
     )
 

@@ -30,6 +30,7 @@ try:
         ResponseOutputMessage,
         ResponseOutputRefusal,
         ResponseOutputText,
+        ResponseReasoningItem,
         ResponseUsage,
     )
     from openai.types.responses.response_input_item_param import FunctionCallOutput
@@ -69,6 +70,14 @@ class OpenAIResponsesProvider(Provider):
     input/output items.  Exceptions from the OpenAI SDK are translated to
     avior's provider-agnostic hierarchy (`ProviderError` and subclasses), with
     the original exception preserved as `__cause__`.
+
+    Known limitation - reasoning items: reasoning models (e.g. the o-series)
+    return reasoning items in their output, and with server-side state disabled
+    (`store=False`) OpenAI expects those items sent back on a follow-up request,
+    especially next to tool calls.  The canonical IR has no slot for them yet,
+    so they are dropped.  A single-turn answer still works, but a tool call from
+    a reasoning model may be rejected on the continuation request that returns
+    the tool result.
     """
 
     def __init__(
@@ -131,12 +140,16 @@ class OpenAIResponsesProvider(Provider):
             ProviderHTTPError: The provider returned a 4xx or 5xx HTTP response.
                 `status_code` carries the wire status.
             ProviderResponseValidationError: The provider returned a successful
-                response whose body could not be decoded (typically indicates
-                an outdated `openai` package).
+                response that could not be decoded (typically an outdated
+                `openai` package), or that carries an output item the adapter
+                does not support.
             ProviderConnectionError: Network-level failure (DNS / TCP / TLS /
                 timeout) - no HTTP response was received.
-            ProviderError: Any other unexpected failure from the OpenAI SDK,
-                preserved as `__cause__`.
+            ProviderError: Any other unexpected failure from the OpenAI SDK.
+
+        Errors translated from an OpenAI SDK exception preserve it as
+        `__cause__`; validation errors avior detects in an otherwise successful
+        response are raised directly.
         """
 
         logger.debug("complete: model=%s, messages=%d", settings.model, len(messages))
@@ -201,10 +214,28 @@ class OpenAIResponsesProvider(Provider):
                             parts.append(TextPart(text=content.text))
                         case ResponseOutputRefusal():
                             refusal_parts.append(TextPart(text=content.refusal))
+                        case _:
+                            assert_never(content)
 
             elif isinstance(item, ResponseFunctionToolCall):
                 if not incomplete:
                     parts.append(self._to_tool_call_part(item))
+
+            elif isinstance(item, ResponseReasoningItem):
+                # Reasoning items appear by default for reasoning models.  The
+                # canonical IR has no slot for them yet, so they are skipped -
+                # not raised - to keep reasoning models working for single-turn
+                # use.  See the class docstring for the continuation limitation.
+                continue
+
+            else:
+                # An output item avior cannot represent yet (built-in tool
+                # calls / results, etc.).  Fail loud rather than silently
+                # dropping it and returning a misleading success.
+                raise ProviderResponseValidationError(
+                    "OpenAI returned an unsupported output item: "
+                    f"{type(item).__name__}."
+                )
 
         # When the response contains both text and a refusal (rare in non-
         # streaming), the refusal wins: it is the authoritative final word, and
@@ -216,6 +247,15 @@ class OpenAIResponsesProvider(Provider):
             has_refusal=bool(refusal_parts),
             has_tool_call=any(isinstance(p, ToolCallPart) for p in parts),
         )
+        if stop_reason == "error":
+            # The canonical `"error"` reason drops the provider-specific cause;
+            # log the status (and the provider's error message when present) so
+            # an abnormal finish stays diagnosable.
+            detail: str = response.status or "unknown status"
+            if response.error is not None:
+                detail = f"{detail}: {response.error.message}"
+            logger.warning("OpenAI finished abnormally: %s", detail)
+
         raw_usage = (
             response.usage.model_dump(mode="json")
             if response.usage is not None
@@ -230,6 +270,18 @@ class OpenAIResponsesProvider(Provider):
             model=response.model,
             provider_name="openai",
         )
+
+    async def aclose(self) -> None:
+        """Close the underlying SDK client when this provider owns it.
+
+        No-op when the client was supplied by the caller via `client=` - its
+        lifecycle belongs to whoever passed it in.  Safe to call more than once:
+        `AsyncOpenAI.close` (and the httpx pool it delegates to) is itself
+        idempotent.
+        """
+
+        if self._owns_client:
+            await self._client.close()
 
     @staticmethod
     def _map_usage(usage: ResponseUsage | None) -> Usage | None:
@@ -280,36 +332,58 @@ class OpenAIResponsesProvider(Provider):
     ) -> StopReason:
         """Map OpenAI Responses signals to a canonical `StopReason`.
 
-        Channels are checked in order; the first match wins:
+        Resolved from `response.status` first, then - for a normal completion -
+        from the response content.
 
-        1. `status == "incomplete"` with `incomplete_details.reason`:
-           - `"max_output_tokens"` -> `"max_tokens"` (truncated at the cap);
-           - `"content_filter"` -> `"content_filter"` (blocked).
+        Status:
 
-           An incomplete response whose `reason` the SDK left unset falls
-           through (the field is typed `Optional`, though OpenAI sets it in
-           practice).
-        2. A `ResponseOutputRefusal` part on a completed response ->
-           `"refusal"` (the model itself declined).
-        3. One or more `function_call` items -> `"tool_use"`.  The Responses
-           API has no dedicated stop-reason field for this; their presence is
-           the signal.
-        4. Anything else -> `"stop"`: a normal completion.  The caller then
-           decides what to do from `parts` alone.
+        - `"incomplete"`: resolved from `incomplete_details.reason`:
+            - `"max_output_tokens"` -> `"max_tokens"` (truncated at the cap);
+            - `"content_filter"` -> `"content_filter"` (blocked).
+
+          A reason the SDK left unset falls through to the content
+          classification below (the field is typed `Optional`, though OpenAI
+          sets it in practice).
+        - `"failed"` / `"cancelled"` / `"queued"` / `"in_progress"` ->
+          `"error"`.  A terminal failure (`"failed"` / `"cancelled"`) or a
+          non-terminal status a non-streaming `create` should not return
+          (`"queued"` / `"in_progress"`): no usable result, surfaced rather
+          than passed off as a successful empty stop.
+        - `"completed"` / `None`: classified from the content below.
+
+        Content (for a completed or reason-less incomplete response):
+
+        - a `ResponseOutputRefusal` part -> `"refusal"` (the model declined);
+        - one or more `function_call` items -> `"tool_use"` (the Responses API
+          has no dedicated stop-reason field; their presence is the signal);
+        - otherwise -> `"stop"`.
+
+        Every `Response.status` is handled; an unknown value (added by a newer
+        `openai`) trips `assert_never`.
         """
 
-        if response.status == "incomplete":
-            details = response.incomplete_details
-            if details is not None:
-                match details.reason:
-                    case "max_output_tokens":
-                        return "max_tokens"
-                    case "content_filter":
-                        return "content_filter"
-                    case None:
-                        pass
-                    case _:
-                        assert_never(details.reason)
+        match response.status:
+            case "incomplete":
+                details = response.incomplete_details
+                if details is not None:
+                    match details.reason:
+                        case "max_output_tokens":
+                            return "max_tokens"
+                        case "content_filter":
+                            return "content_filter"
+                        case None:
+                            pass
+                        case _:
+                            assert_never(details.reason)
+
+            case "failed" | "cancelled" | "queued" | "in_progress":
+                return "error"
+
+            case "completed" | None:
+                pass
+
+            case _:
+                assert_never(response.status)
 
         if has_refusal:
             return "refusal"
@@ -318,18 +392,6 @@ class OpenAIResponsesProvider(Provider):
             return "tool_use"
 
         return "stop"
-
-    async def aclose(self) -> None:
-        """Close the underlying SDK client when this provider owns it.
-
-        No-op when the client was supplied by the caller via `client=` - its
-        lifecycle belongs to whoever passed it in.  Safe to call more than once:
-        `AsyncOpenAI.close` (and the httpx pool it delegates to) is itself
-        idempotent.
-        """
-
-        if self._owns_client:
-            await self._client.close()
 
     @staticmethod
     def _to_tool_param(tool: Tool[Any, Any, Any]) -> FunctionToolParam:

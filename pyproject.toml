@@ -34,7 +34,7 @@ anthropic = [
     "anthropic>=0.71",
 ]
 openai = [
-    "openai>=1.50",
+    "openai>=2.0",
 ]
 gemini = [
     "google-genai>=2.7.0",
