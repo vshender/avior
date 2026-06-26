@@ -121,6 +121,18 @@ class ToolResultPart(BaseModel):
     result: ToolResult
     """The call's outcome."""
 
+    @classmethod
+    def ok(cls, call_id: str, content: str) -> Self:
+        """Build a successful result for the call `call_id`."""
+
+        return cls(call_id=call_id, result=ToolResultOk(content=content))
+
+    @classmethod
+    def error(cls, call_id: str, message: str) -> Self:
+        """Build an error result for the call `call_id`."""
+
+        return cls(call_id=call_id, result=ToolResultError(content=message))
+
 
 type AssistantPart = Annotated[
     TextPart | ToolCallPart,

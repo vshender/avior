@@ -25,8 +25,6 @@ from avior.core.messages import (
     Message,
     ToolCallPart,
     ToolMessage,
-    ToolResultError,
-    ToolResultOk,
     ToolResultPart,
     UserMessage,
 )
@@ -221,7 +219,7 @@ class Runner:
             if response.usage is not None:
                 usages.append(response.usage)
 
-            _raise_for_error_stop(message, agent.model_settings)
+            self._raise_for_error_stop(message, agent.model_settings)
 
             # The model produced no content at all - no text and no tool calls.
             # That is a degenerate response, not a usable answer, so surface it
@@ -317,45 +315,48 @@ class Runner:
             case _:
                 assert_never(message)
 
+    @staticmethod
+    def _raise_for_error_stop(
+        message: AssistantMessage,
+        settings: ModelSettings,
+    ) -> None:
+        """Raise the matching `AgentRunError` for a non-continuable stop reason.
 
-def _raise_for_error_stop(message: AssistantMessage, settings: ModelSettings) -> None:
-    """Raise the matching `AgentRunError` for a non-continuable stop reason.
+        `"stop"` and `"tool_use"` continue the run; the rest abort it.
+        """
 
-    `"stop"` and `"tool_use"` continue the run; the rest abort it.
-    """
-
-    match message.stop_reason:
-        case "content_filter":
-            raise ContentFilterError(
-                "Response was blocked by the provider's content filter."
-            )
-
-        case "max_tokens":
-            configured = settings.max_tokens
-            detail = (
-                f"Model hit max_tokens budget ({configured}) before completing."
-                if configured is not None
-                else (
-                    "Model hit the provider's default token cap before "
-                    "completing.  Set `ModelSettings.max_tokens` explicitly "
-                    "to raise the limit."
+        match message.stop_reason:
+            case "content_filter":
+                raise ContentFilterError(
+                    "Response was blocked by the provider's content filter."
                 )
-            )
-            raise MaxTokensExceededError(detail)
 
-        case "refusal":
-            raise ModelRefusalError(message.text or "")
+            case "max_tokens":
+                configured = settings.max_tokens
+                detail = (
+                    f"Model hit max_tokens budget ({configured}) before completing."
+                    if configured is not None
+                    else (
+                        "Model hit the provider's default token cap before "
+                        "completing.  Set `ModelSettings.max_tokens` explicitly "
+                        "to raise the limit."
+                    )
+                )
+                raise MaxTokensExceededError(detail)
 
-        case "error":
-            raise UnexpectedModelBehaviorError(
-                "Model terminated abnormally without a usable response."
-            )
+            case "refusal":
+                raise ModelRefusalError(message.text or "")
 
-        case "stop" | "tool_use":
-            pass
+            case "error":
+                raise UnexpectedModelBehaviorError(
+                    "Model terminated abnormally without a usable response."
+                )
 
-        case _:
-            assert_never(message.stop_reason)
+            case "stop" | "tool_use":
+                pass
+
+            case _:
+                assert_never(message.stop_reason)
 
 
 async def _run_tool(
@@ -372,12 +373,12 @@ async def _run_tool(
 
     tool = tools_by_name.get(call.tool_name)
     if tool is None:
-        return _error_result(call, f"Unknown tool: {call.tool_name!r}.")
+        return ToolResultPart.error(call.call_id, f"Unknown tool: {call.tool_name!r}.")
 
     try:
         args = tool.args_model.model_validate(call.args)
     except ValidationError as exc:
-        return _error_result(call, f"Invalid arguments: {exc}")
+        return ToolResultPart.error(call.call_id, f"Invalid arguments: {exc}")
 
     ctx = RunContext[Any](
         deps=deps,
@@ -388,21 +389,9 @@ async def _run_tool(
     try:
         result = await tool.execute(ctx, args)
     except Exception as exc:  # noqa: BLE001  (tool failures are reported to the model, not raised)
-        return _error_result(call, f"Tool raised an error: {exc}")
+        return ToolResultPart.error(call.call_id, f"Tool raised an error: {exc}")
 
-    return ToolResultPart(
-        call_id=call.call_id,
-        result=ToolResultOk(content=_serialize(result)),
-    )
-
-
-def _error_result(call: ToolCallPart, message: str) -> ToolResultPart:
-    """Build an `error` `ToolResultPart` for `call`."""
-
-    return ToolResultPart(
-        call_id=call.call_id,
-        result=ToolResultError(content=message),
-    )
+    return ToolResultPart.ok(call.call_id, _serialize(result))
 
 
 def _serialize(result: object) -> str:

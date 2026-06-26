@@ -61,27 +61,6 @@ type StubPredicate = Callable[[StubCall], bool]
 """A predicate over the `StubCall`, used by `from_predicates`."""
 
 
-def _normalize_response(response: StubResponse) -> ProviderResponse:
-    """Coerce any scripted `StubResponse` to a `ProviderResponse`.
-
-    Args:
-        response: A raw string, an `AssistantMessage`, or a fully-formed
-            `ProviderResponse`.
-
-    Returns:
-        A `ProviderResponse` ready to be returned from `Provider.complete`.
-        The sugar forms (`str`, `AssistantMessage`) carry no call metadata.
-    """
-
-    if isinstance(response, str):
-        message = AssistantMessage(parts=[TextPart(text=response)], stop_reason="stop")
-        return ProviderResponse(message=message)
-    elif isinstance(response, AssistantMessage):
-        return ProviderResponse(message=response)
-    else:
-        return response
-
-
 class StubProvider(Provider):
     """Programmable test double for the `Provider` abstraction.
 
@@ -273,9 +252,33 @@ class StubProvider(Provider):
         if isawaitable(result):
             result = await result
 
-        return _normalize_response(result)
+        return self._normalize_response(result)
 
     async def aclose(self) -> None:
         """No-op: the stub holds no real resources to release."""
 
         pass
+
+    @staticmethod
+    def _normalize_response(response: StubResponse) -> ProviderResponse:
+        """Coerce any scripted `StubResponse` to a `ProviderResponse`.
+
+        Args:
+            response: A raw string, an `AssistantMessage`, or a fully-formed
+                `ProviderResponse`.
+
+        Returns:
+            A `ProviderResponse` ready to be returned from `Provider.complete`.
+            The sugar forms (`str`, `AssistantMessage`) carry no call metadata.
+        """
+
+        if isinstance(response, str):
+            message = AssistantMessage(
+                parts=[TextPart(text=response)],
+                stop_reason="stop",
+            )
+            return ProviderResponse(message=message)
+        elif isinstance(response, AssistantMessage):
+            return ProviderResponse(message=response)
+        else:
+            return response
