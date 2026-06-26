@@ -31,7 +31,7 @@ Issues = "https://github.com/vshender/avior/issues"
 
 [project.optional-dependencies]
 anthropic = [
-    "anthropic>=0.40",
+    "anthropic>=0.71",
 ]
 openai = [
     "openai>=1.50",

@@ -99,10 +99,10 @@ class AnthropicProvider(Provider):
         tools: Sequence[Tool[Any, Any, Any]] = (),
         system_prompt: str | None = None,
     ) -> ProviderResponse:
-        """Send the conversation to Claude and return the assistant's response.
+        """Send the conversation to Claude and return the response.
 
         `max_tokens` falls back to 4096 when `settings.max_tokens is None`;
-        `temperature` is forwarded only if explicitly set on `settings`.
+        `temperature` is forwarded only when explicitly set on `settings`.
 
         Args:
             messages: Conversation transcript (user / assistant / tool turns).
@@ -123,12 +123,20 @@ class AnthropicProvider(Provider):
             ProviderHTTPError: The provider returned a 4xx or 5xx HTTP response.
                 `status_code` carries the wire status.
             ProviderResponseValidationError: The provider returned a successful
-                response whose body could not be decoded (typically indicates
-                an outdated `anthropic` package).
+                response that could not be decoded (typically an outdated
+                `anthropic` package), or whose decoded content avior cannot
+                accept as a finished assistant turn (for example an unsupported
+                content block, or a turn Anthropic paused for continuation).
             ProviderConnectionError: Network-level failure (DNS / TCP / TLS /
                 timeout) - no HTTP response was received.
-            ProviderError: Any other unexpected failure from the Anthropic
-                SDK, preserved as `__cause__`.
+            ProviderError: A request the Anthropic SDK refuses to send without
+                streaming (a large `max_tokens` risking the 10-minute
+                non-streaming limit), or any other unexpected failure from the
+                Anthropic SDK.
+
+        Errors translated from an Anthropic SDK exception preserve it as
+        `__cause__`; validation errors avior detects in an otherwise successful
+        response are raised directly.
         """
 
         logger.debug("complete: model=%s, messages=%d", settings.model, len(messages))
@@ -167,6 +175,22 @@ class AnthropicProvider(Provider):
             raise ProviderResponseValidationError(str(e)) from e
         except anthropic.APIConnectionError as e:
             raise ProviderConnectionError(str(e)) from e
+        except ValueError as e:
+            # The Anthropic SDK guards client-side: a non-streaming request
+            # whose `max_tokens` risks exceeding the 10-minute limit raises a
+            # plain `ValueError` (not an `AnthropicError`) before any network
+            # call.  Translate it into the provider hierarchy with an actionable
+            # message rather than leaking a raw `ValueError`.  Re-raise any
+            # other `ValueError`.
+            if "Streaming is required" in str(e):
+                raise ProviderError(
+                    "Anthropic requires streaming for this request:  "
+                    f"max_tokens ({max_tokens}) risks exceeding the 10-minute "
+                    "non-streaming limit, and avior has no streaming support "
+                    "yet.  Lower max_tokens."
+                ) from e
+            else:
+                raise
         except anthropic.AnthropicError as e:
             raise ProviderError(str(e)) from e
 
@@ -182,8 +206,27 @@ class AnthropicProvider(Provider):
                         args=cast(dict[str, Any], block.input),
                     )
                 )
+            else:
+                # A block avior cannot represent yet (thinking, server tool
+                # use / results, container uploads, ...).  avior does not enable
+                # the features that produce these, so failing loud beats
+                # silently dropping content and returning a misleading success.
+                raise ProviderResponseValidationError(
+                    "Anthropic returned an unsupported content block: "
+                    f"{type(block).__name__}."
+                )
 
         stop_reason = self._map_stop_reason(response)
+
+        # `stop_reason="tool_use"` with no decoded tool call would hand the
+        # `Runner` an empty turn that reads as a final answer; surface it
+        # instead.
+        if stop_reason == "tool_use" and not any(
+            isinstance(p, ToolCallPart) for p in parts
+        ):
+            raise ProviderResponseValidationError(
+                "Anthropic reported stop_reason='tool_use' but decoded no tool call."
+            )
 
         return ProviderResponse(
             message=AssistantMessage(parts=parts, stop_reason=stop_reason),
@@ -194,9 +237,21 @@ class AnthropicProvider(Provider):
             provider_name="anthropic",
         )
 
+    async def aclose(self) -> None:
+        """Close the underlying SDK client when this provider owns it.
+
+        No-op when the client was supplied by the caller via `client=` - its
+        lifecycle belongs to whoever passed it in.  Safe to call more than once:
+        `AsyncAnthropic.close` (and the httpx pool it delegates to) is itself
+        idempotent.
+        """
+
+        if self._owns_client:
+            await self._client.close()
+
     @staticmethod
     def _map_usage(usage: AnthropicUsage) -> Usage:
-        """Map Anthropic's `Usage` to the canonical `Usage`.
+        """Map `AnthropicUsage` to the canonical `Usage`.
 
         - `input_tokens`: Anthropic reports the *non-cached* input only, with
           cache reads / creation separate and additional; avior's `input_tokens`
@@ -227,8 +282,18 @@ class AnthropicProvider(Provider):
         - `"tool_use"` -> `"tool_use"` (the model requested tool calls).
         - `"max_tokens"` -> `"max_tokens"` (output truncated at the cap).
         - `"refusal"` -> `"refusal"` (the model itself declined).
-        - Anything else (`"end_turn"`, `"stop_sequence"`, `"pause_turn"`,
-          `None`) -> `"stop"` (normal completion).
+        - `"end_turn"` / `"stop_sequence"` / `None` -> `"stop"` (normal
+          completion).
+
+        `"pause_turn"` is rejected: it marks a turn Anthropic paused mid-flight
+        (long-running server tools), to be resumed by sending the partial
+        assistant content back unchanged.  avior has no continuation path, so
+        treating it as a normal stop would surface a half-finished turn as the
+        final answer.
+
+        Every known `stop_reason` is handled; an unknown value (added by a
+        newer `anthropic`) trips `assert_never`, both statically and at runtime,
+        so it gets an explicit mapping instead of a silent default.
         """
 
         match response.stop_reason:
@@ -238,20 +303,16 @@ class AnthropicProvider(Provider):
                 return "max_tokens"
             case "refusal":
                 return "refusal"
-            case _:
+            case "end_turn" | "stop_sequence" | None:
                 return "stop"
-
-    async def aclose(self) -> None:
-        """Close the underlying SDK client when this provider owns it.
-
-        No-op when the client was supplied by the caller via `client=` - its
-        lifecycle belongs to whoever passed it in.  Safe to call more than once:
-        `AsyncAnthropic.close` (and the httpx pool it delegates to) is itself
-        idempotent.
-        """
-
-        if self._owns_client:
-            await self._client.close()
+            case "pause_turn":
+                raise ProviderResponseValidationError(
+                    "Anthropic paused the turn (stop_reason='pause_turn'), "
+                    "which requires resuming the request to finish.  avior does "
+                    "not support continuation yet."
+                )
+            case _:
+                assert_never(response.stop_reason)
 
     @staticmethod
     def _to_tool_param(tool: Tool[Any, Any, Any]) -> ToolParam:

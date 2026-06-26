@@ -86,7 +86,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "anthropic", marker = "extra == 'anthropic'", specifier = ">=0.40" },
+    { name = "anthropic", marker = "extra == 'anthropic'", specifier = ">=0.71" },
     { name = "avior", extras = ["anthropic", "openai", "gemini"], marker = "extra == 'all'" },
     { name = "docstring-parser", specifier = ">=0.16" },
     { name = "google-genai", marker = "extra == 'gemini'", specifier = ">=2.7.0" },

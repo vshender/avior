@@ -22,6 +22,8 @@ pytestmark = pytest.mark.skipif(
     reason="ANTHROPIC_API_KEY not set",
 )
 
+_MODEL = "claude-haiku-4-5-20251001"
+
 
 class _MagicNumberArgs(BaseModel):
     """Arguments for the `_MagicNumber` tool."""
@@ -61,10 +63,7 @@ async def test_runner_run_against_anthropic_returns_non_empty_text(
     # GIVEN an agent and a runner using the real Anthropic provider
     agent = Agent(
         instructions="Reply with one short word.",
-        model_settings=ModelSettings(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=64,
-        ),
+        model_settings=ModelSettings(model=_MODEL, max_tokens=64),
     )
 
     # WHEN we run a trivial prompt
@@ -86,10 +85,7 @@ async def test_runner_run_raises_max_tokens_exceeded_against_anthropic(
     # GIVEN an agent with `model_settings.max_tokens` too small to complete
     agent = Agent(
         instructions="Write a long story.",
-        model_settings=ModelSettings(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=1,
-        ),
+        model_settings=ModelSettings(model=_MODEL, max_tokens=1),
     )
 
     # WHEN `Runner.run` is invoked
@@ -104,7 +100,7 @@ async def test_runner_run_against_anthropic_calls_a_tool_end_to_end(
     """`Runner.run` drives a full tool round-trip against real Anthropic.
 
     Exercises the wire contract that mocks cannot: Anthropic accepts our tool
-    definition, returns a `tool_use` block, accepts the echoed `tool_use` plus
+    declaration, returns a `tool_use` block, accepts the echoed `tool_use` plus
     `tool_result` blocks on the continuation request, and produces a final
     answer relaying the tool's result.
     """
@@ -116,10 +112,7 @@ async def test_runner_run_against_anthropic_calls_a_tool_end_to_end(
             "When asked for a city's magic number, you must call the "
             "get_magic_number tool, then state the number it returns."
         ),
-        model_settings=ModelSettings(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=256,
-        ),
+        model_settings=ModelSettings(model=_MODEL, max_tokens=256),
         tools=[tool],
     )
 

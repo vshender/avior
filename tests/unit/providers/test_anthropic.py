@@ -15,7 +15,7 @@ from anthropic import (
     omit,
 )
 from anthropic.types import Message as AnthropicMessage
-from anthropic.types import TextBlock, ToolUseBlock, Usage
+from anthropic.types import TextBlock, ThinkingBlock, ToolUseBlock, Usage
 from pydantic import BaseModel
 
 from avior.core.context import RunContext
@@ -28,6 +28,7 @@ from avior.core.exceptions import (
 from avior.core.messages import (
     AssistantMessage,
     Message,
+    StopReason,
     TextPart,
     ToolCallPart,
     ToolMessage,
@@ -71,7 +72,14 @@ def _response(*texts: str, usage: Usage | None = None) -> AnthropicMessage:
 
 
 def _response_with_stop_reason(
-    stop_reason: Literal["end_turn", "max_tokens", "refusal"],
+    stop_reason: Literal[
+        "end_turn",
+        "max_tokens",
+        "stop_sequence",
+        "pause_turn",
+        "refusal",
+    ]
+    | None,
 ) -> AnthropicMessage:
     """Build a minimal assistant response with the given `stop_reason`."""
 
@@ -184,9 +192,9 @@ async def test_provider_prefers_explicit_client_over_api_key() -> None:
 async def test_complete_returns_assistant_message_parsed_from_response() -> None:
     """`complete` returns the assistant message decoded from the response."""
 
-    # GIVEN a mock client returning a single-text-block assistant message
-    mock_client = _mock_client_returning(_response("Hi!"))
-    provider = _provider(mock_client)
+    # GIVEN a response with a single text block
+    response = _response("Hi!")
+    provider = _provider(_mock_client_returning(response))
 
     # WHEN `complete` is awaited
     result = await provider.complete([UserMessage.from_text("hello")], _settings())
@@ -229,8 +237,7 @@ async def test_complete_omits_system_prompt_when_none() -> None:
     await provider.complete([UserMessage.from_text("hello")], _settings())
 
     # THEN the `system` kwarg is the `omit` sentinel
-    call_kwargs = mock_client.messages.create.call_args.kwargs
-    assert call_kwargs["system"] is omit
+    assert mock_client.messages.create.call_args.kwargs["system"] is omit
 
 
 async def test_complete_forwards_explicit_max_tokens_and_temperature() -> None:
@@ -278,16 +285,15 @@ async def test_complete_omits_temperature_when_unset() -> None:
     await provider.complete([UserMessage.from_text("hi")], settings)
 
     # THEN the `temperature` kwarg is the `omit` sentinel
-    kwargs = mock_client.messages.create.call_args.kwargs
-    assert kwargs["temperature"] is omit
+    assert mock_client.messages.create.call_args.kwargs["temperature"] is omit
 
 
 async def test_complete_maps_each_response_text_block_to_a_part() -> None:
     """`complete` maps each response `TextBlock` to its own `TextPart`."""
 
-    # GIVEN a mock client returning a response with two text blocks
-    mock_client = _mock_client_returning(_response("hello ", "world"))
-    provider = _provider(mock_client)
+    # GIVEN a response with two text blocks
+    response = _response("hello ", "world")
+    provider = _provider(_mock_client_returning(response))
 
     # WHEN `complete` is awaited
     result = await provider.complete([UserMessage.from_text("hi")], _settings())
@@ -299,9 +305,9 @@ async def test_complete_maps_each_response_text_block_to_a_part() -> None:
 async def test_complete_returns_empty_parts_when_response_content_is_empty() -> None:
     """`complete` returns `parts=[]` when the response has no content blocks."""
 
-    # GIVEN a mock client returning a response with empty content (zero blocks)
-    mock_client = _mock_client_returning(_response())
-    provider = _provider(mock_client)
+    # GIVEN a response with empty content (zero blocks)
+    response = _response()
+    provider = _provider(_mock_client_returning(response))
 
     # WHEN `complete` is awaited
     result = await provider.complete([UserMessage.from_text("hi")], _settings())
@@ -310,14 +316,43 @@ async def test_complete_returns_empty_parts_when_response_content_is_empty() -> 
     assert result.message.parts == []
 
 
+async def test_complete_raises_on_unsupported_content_block() -> None:
+    """A content block avior cannot represent raises rather than dropping.
+
+    The adapter maps only `TextBlock` / `ToolUseBlock`; any other block (here a
+    `ThinkingBlock`) carries content the canonical IR has no slot for, so it
+    fails loud instead of being silently dropped into a misleading success.
+    """
+
+    # GIVEN a response carrying a thinking block the adapter does not map
+    response = AnthropicMessage(
+        id="msg_test",
+        type="message",
+        role="assistant",
+        model="claude-test",
+        content=[ThinkingBlock(type="thinking", thinking="hmm", signature="sig")],
+        stop_reason="end_turn",
+        stop_sequence=None,
+        usage=Usage(input_tokens=0, output_tokens=0),
+    )
+    provider = _provider(_mock_client_returning(response))
+
+    # WHEN `complete` is awaited
+    # THEN `ProviderResponseValidationError` is raised
+    with pytest.raises(ProviderResponseValidationError):
+        await provider.complete([UserMessage.from_text("hi")], _settings())
+
+
 # Call-metadata mapping tests
 # -----------------------------------------------------------------------------
 
 
 async def test_complete_maps_usage_ids_and_model_onto_provider_response() -> None:
-    """`complete` maps Anthropic usage, response id, and model to wrapper."""
+    """`complete` maps Anthropic usage, response id, and model onto the
+    wrapper.
+    """
 
-    # GIVEN a mock client returning a response with the call metadata
+    # GIVEN a response carrying the call metadata (usage, id, and served model)
     response = _response(
         "hi",
         usage=Usage(
@@ -332,19 +367,17 @@ async def test_complete_maps_usage_ids_and_model_onto_provider_response() -> Non
     # WHEN `complete` is awaited
     result = await provider.complete([UserMessage.from_text("hi")], _settings())
 
-    # THEN usage is normalized: Anthropic's cache-excluding input (11) is
-    # widened to include the cache sub-slices (11 + 5 + 2 = 18), which remain
-    # available individually, and total is derived (18 + 7)
+    # THEN usage is normalized: cache-excluding input (11) widens to include the
+    # cache sub-slices (11 + 5 + 2 = 18), which remain available individually;
+    # reasoning stays `None` (Anthropic does not itemize it out of output, so it
+    # is unknown, not 0); total is derived (18 + 7 = 25)
     assert result.usage is not None
     assert result.usage.input_tokens == 18
     assert result.usage.output_tokens == 7
+    assert result.usage.reasoning_tokens is None
     assert result.usage.cache_read_tokens == 5
     assert result.usage.cache_write_tokens == 2
     assert result.usage.total_tokens == 25
-
-    # AND reasoning stays None: Anthropic does not itemize it out of output, so
-    # it is unknown, not 0
-    assert result.usage.reasoning_tokens is None
 
     # AND the provider-native usage is preserved beside the normalized counts
     assert result.raw_usage is not None
@@ -370,7 +403,8 @@ async def test_complete_translates_api_status_error_to_http_error() -> None:
         response=_http_response(429),
         body=None,
     )
-    provider = _provider(_mock_client_raising(anthropic_error))
+    mock_client = _mock_client_raising(anthropic_error)
+    provider = _provider(mock_client)
 
     # WHEN `complete` is invoked
     # THEN `ProviderHTTPError` is raised with the HTTP status, and the original
@@ -391,7 +425,8 @@ async def test_complete_translates_response_validation_error() -> None:
         body=None,
         message="schema mismatch",
     )
-    provider = _provider(_mock_client_raising(anthropic_error))
+    mock_client = _mock_client_raising(anthropic_error)
+    provider = _provider(mock_client)
 
     # WHEN `complete` is invoked
     # THEN `ProviderResponseValidationError` is raised, with the original
@@ -407,7 +442,8 @@ async def test_complete_translates_connection_error() -> None:
     # GIVEN a mock client raising `APIConnectionError` (network failed before an
     # HTTP response was received)
     anthropic_error = APIConnectionError(request=_http_request())
-    provider = _provider(_mock_client_raising(anthropic_error))
+    mock_client = _mock_client_raising(anthropic_error)
+    provider = _provider(mock_client)
 
     # WHEN `complete` is invoked
     # THEN `ProviderConnectionError` is raised with the original exception
@@ -423,7 +459,8 @@ async def test_complete_translates_timeout_as_connection_error() -> None:
     # GIVEN a mock client raising `APITimeoutError` (subclass of
     # `APIConnectionError`)
     anthropic_error = APITimeoutError(request=_http_request())
-    provider = _provider(_mock_client_raising(anthropic_error))
+    mock_client = _mock_client_raising(anthropic_error)
+    provider = _provider(mock_client)
 
     # WHEN `complete` is invoked
     # THEN `ProviderConnectionError` is raised (timeouts surface as
@@ -439,7 +476,8 @@ async def test_complete_translates_other_anthropic_errors_to_provider_error() ->
     # GIVEN a mock client raising a generic `AnthropicError` (not in the
     # `APIError` family that the specific handlers catch)
     anthropic_error = AnthropicError("unexpected SDK failure")
-    provider = _provider(_mock_client_raising(anthropic_error))
+    mock_client = _mock_client_raising(anthropic_error)
+    provider = _provider(mock_client)
 
     # WHEN `complete` is invoked
     # THEN `ProviderError` (the exact base class, not a subclass) is raised
@@ -450,49 +488,101 @@ async def test_complete_translates_other_anthropic_errors_to_provider_error() ->
     assert exc_info.value.__cause__ is anthropic_error
 
 
+async def test_complete_translates_streaming_required_value_error() -> None:
+    """The SDK's "Streaming is required" `ValueError` maps to `ProviderError`.
+
+    A non-streaming request whose `max_tokens` risks the 10-minute limit raises
+    a plain `ValueError` client-side; without translation it would escape the
+    provider hierarchy, so it is wrapped (with `__cause__` preserved).
+    """
+
+    # GIVEN a mock client raising the SDK's client-side streaming `ValueError`
+    sdk_error = ValueError(
+        "Streaming is required for operations that may take longer than 10 minutes."
+    )
+    mock_client = _mock_client_raising(sdk_error)
+    provider = _provider(mock_client)
+
+    # WHEN `complete` is invoked
+    # THEN `ProviderError` is raised, preserving `__cause__`
+    with pytest.raises(ProviderError) as exc_info:
+        await provider.complete([UserMessage.from_text("hi")], _settings())
+    assert exc_info.value.__cause__ is sdk_error
+
+
+async def test_complete_reraises_unrelated_value_error() -> None:
+    """A `ValueError` other than the streaming guard is re-raised as-is."""
+
+    # GIVEN a mock client raising an unrelated `ValueError`
+    sdk_error = ValueError("some unrelated problem")
+    mock_client = _mock_client_raising(sdk_error)
+    provider = _provider(mock_client)
+
+    # WHEN `complete` is invoked
+    # THEN the original `ValueError` propagates (not wrapped as `ProviderError`)
+    with pytest.raises(ValueError) as exc_info:
+        await provider.complete([UserMessage.from_text("hi")], _settings())
+    assert exc_info.value is sdk_error
+
+
 # Stop-reason mapping tests
 # -----------------------------------------------------------------------------
 
 
-async def test_complete_sets_stop_reason_stop_on_end_turn() -> None:
-    """Anthropic `stop_reason="end_turn"` maps to canonical `"stop"`."""
+@pytest.mark.parametrize(
+    ("anthropic_stop_reason", "expected_stop_reason"),
+    [
+        ("end_turn", "stop"),
+        ("max_tokens", "max_tokens"),
+        ("refusal", "refusal"),
+        ("stop_sequence", "stop"),
+        (None, "stop"),
+    ],
+    ids=["end_turn", "max_tokens", "refusal", "stop_sequence", "none"],
+)
+async def test_complete_maps_stop_reason_to_canonical(
+    anthropic_stop_reason: Literal[
+        "end_turn",
+        "max_tokens",
+        "stop_sequence",
+        "refusal",
+    ]
+    | None,
+    expected_stop_reason: StopReason,
+) -> None:
+    """Anthropic's `stop_reason` maps to the canonical `StopReason`.
 
-    # GIVEN a mock client returning a normal end-of-turn response
-    provider = _provider(_mock_client_returning(_response_with_stop_reason("end_turn")))
+    `end_turn` / `stop_sequence` / `None` all fall into the catch-all `"stop"`;
+    `max_tokens` and `refusal` map to their own reasons.
+    """
 
-    # WHEN `complete` is awaited
-    result = await provider.complete([UserMessage.from_text("hi")], _settings())
-
-    # THEN the canonical `stop_reason` is `"stop"`
-    assert result.message.stop_reason == "stop"
-
-
-async def test_complete_maps_max_tokens_to_max_tokens_stop_reason() -> None:
-    """Anthropic `stop_reason="max_tokens"` maps to canonical `"max_tokens"`."""
-
-    # GIVEN a mock client returning a max-tokens-truncated response
-    provider = _provider(
-        _mock_client_returning(_response_with_stop_reason("max_tokens"))
-    )
-
-    # WHEN `complete` is awaited
-    result = await provider.complete([UserMessage.from_text("hi")], _settings())
-
-    # THEN the canonical `stop_reason` is `"max_tokens"`
-    assert result.message.stop_reason == "max_tokens"
-
-
-async def test_complete_maps_refusal_to_refusal_stop_reason() -> None:
-    """Anthropic `refusal` stop_reason maps to canonical `"refusal"`."""
-
-    # GIVEN a mock client returning a refusal response
-    provider = _provider(_mock_client_returning(_response_with_stop_reason("refusal")))
+    # GIVEN a response carrying the given Anthropic stop reason
+    response = _response_with_stop_reason(anthropic_stop_reason)
+    provider = _provider(_mock_client_returning(response))
 
     # WHEN `complete` is awaited
     result = await provider.complete([UserMessage.from_text("hi")], _settings())
 
-    # THEN the canonical `stop_reason` is `"refusal"`
-    assert result.message.stop_reason == "refusal"
+    # THEN it maps to the expected canonical stop reason
+    assert result.message.stop_reason == expected_stop_reason
+
+
+async def test_complete_raises_on_pause_turn_stop_reason() -> None:
+    """`stop_reason="pause_turn"` raises rather than reading as completion.
+
+    A paused turn is unfinished: Anthropic expects the partial assistant
+    content sent back to resume.  avior has no continuation path, so mapping it
+    to `"stop"` would surface a half-finished turn as the final answer.
+    """
+
+    # GIVEN a response that Anthropic paused mid-turn
+    response = _response_with_stop_reason("pause_turn")
+    provider = _provider(_mock_client_returning(response))
+
+    # WHEN `complete` is awaited
+    # THEN it fails loud instead of returning a partial answer
+    with pytest.raises(ProviderResponseValidationError, match="pause_turn"):
+        await provider.complete([UserMessage.from_text("hi")], _settings())
 
 
 # Tool-calling tests
@@ -502,7 +592,7 @@ async def test_complete_maps_refusal_to_refusal_stop_reason() -> None:
 async def test_complete_parses_tool_use_block_into_tool_call_part() -> None:
     """A response `tool_use` block decodes into a `ToolCallPart`."""
 
-    # GIVEN a provider whose mock client returns a tool-use response
+    # GIVEN a tool-use response
     response = _tool_use_response("call_1", "get_weather", {"city": "Paris"})
     provider = _provider(_mock_client_returning(response))
 
@@ -515,10 +605,53 @@ async def test_complete_parses_tool_use_block_into_tool_call_part() -> None:
     ]
 
 
+async def test_complete_raises_when_tool_use_stop_reason_has_no_tool_call() -> None:
+    """`stop_reason="tool_use"` with no decoded tool call raises.
+
+    Anthropic pairs a `tool_use` stop reason with a `ToolUseBlock`.  A response
+    that claims `tool_use` but decodes no tool call would hand the `Runner` an
+    empty turn read as a final answer, so it fails loud.
+    """
+
+    # GIVEN a `tool_use`-stop response carrying only a text block
+    response = AnthropicMessage(
+        id="msg_test",
+        type="message",
+        role="assistant",
+        model="claude-test",
+        content=[TextBlock(type="text", text="...")],
+        stop_reason="tool_use",
+        stop_sequence=None,
+        usage=Usage(input_tokens=0, output_tokens=0),
+    )
+    provider = _provider(_mock_client_returning(response))
+
+    # WHEN `complete` is awaited
+    # THEN `ProviderResponseValidationError` is raised
+    with pytest.raises(ProviderResponseValidationError):
+        await provider.complete([UserMessage.from_text("weather?")], _settings())
+
+
+async def test_complete_parses_empty_tool_use_input_into_empty_dict() -> None:
+    """A `tool_use` block with empty input decodes to `args={}`."""
+
+    # GIVEN a tool-use response whose block has no input
+    response = _tool_use_response("call_1", "get_weather", {})
+    provider = _provider(_mock_client_returning(response))
+
+    # WHEN `complete` is awaited
+    result = await provider.complete([UserMessage.from_text("weather?")], _settings())
+
+    # THEN the block decodes into a `ToolCallPart` carrying an empty args dict
+    assert result.message.parts == [
+        ToolCallPart(call_id="call_1", tool_name="get_weather", args={})
+    ]
+
+
 async def test_complete_maps_tool_use_to_tool_use_stop_reason() -> None:
     """Anthropic `stop_reason="tool_use"` maps to canonical `"tool_use"`."""
 
-    # GIVEN a provider whose mock client returns a tool-use response
+    # GIVEN a tool-use response
     response = _tool_use_response("call_1", "get_weather", {"city": "Paris"})
     provider = _provider(_mock_client_returning(response))
 
@@ -532,15 +665,16 @@ async def test_complete_maps_tool_use_to_tool_use_stop_reason() -> None:
 async def test_complete_sends_tools_with_name_description_and_input_schema() -> None:
     """Each offered tool is sent with its name, description, and JSON schema."""
 
-    # GIVEN a provider and an offered tool
+    # GIVEN a mock client and an offered tool
     mock_client = _mock_client_returning(_response("ok"))
     provider = _provider(mock_client)
+    tool = _Weather()
 
     # WHEN `complete` is invoked with that tool
     await provider.complete(
         [UserMessage.from_text("hi")],
         _settings(),
-        tools=[_Weather()],
+        tools=[tool],
     )
 
     # THEN the Anthropic SDK call carries the tool's name, description, and args
@@ -558,7 +692,7 @@ async def test_complete_sends_tools_with_name_description_and_input_schema() -> 
 async def test_complete_omits_tools_when_none_offered() -> None:
     """No offered tools means the `tools` kwarg is the `omit` sentinel."""
 
-    # GIVEN a provider and no tools
+    # GIVEN a mock client and no tools offered
     mock_client = _mock_client_returning(_response("ok"))
     provider = _provider(mock_client)
 
