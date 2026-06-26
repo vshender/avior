@@ -11,10 +11,13 @@ from avior.core.agent import Agent
 from avior.core.context import RunContext
 from avior.core.exceptions import (
     ContentFilterError,
+    EmptyInputError,
     MaxIterationsExceeded,
     MaxTokensExceededError,
     MissingDependenciesError,
     ModelRefusalError,
+    OrphanedToolResultError,
+    UnansweredToolCallError,
     UnexpectedModelBehaviorError,
 )
 from avior.core.messages import (
@@ -142,11 +145,17 @@ class Runner:
 
         Raises:
             MissingDependenciesError: `deps_type` is set but `deps` is missing.
+            EmptyInputError: The input carries no content to send.
+            UnansweredToolCallError: A tool call in the input has no matching
+                tool result.
+            OrphanedToolResultError: A tool result references a tool call absent
+                from the input.
             ContentFilterError: An external content filter blocked the response.
             MaxTokensExceededError: Output was truncated by the token budget.
             ModelRefusalError: The model itself declined to answer.
             UnexpectedModelBehaviorError: The model terminated abnormally
-                without a usable response (the `"error"` stop reason).
+                without a usable response - the `"error"` stop reason, or a
+                response with no content (no text and no tool calls).
             MaxIterationsExceeded: The loop hit `max_iter` without finishing.
         """
 
@@ -186,6 +195,7 @@ class Runner:
         input_messages: list[Message] = (
             [UserMessage.from_text(input)] if isinstance(input, str) else list(input)
         )
+        self._validate_input(input_messages)
         tools_by_name = {tool.name: tool for tool in agent.tools}
         max_iter = max_iter if max_iter is not None else agent.max_iter
 
@@ -213,6 +223,15 @@ class Runner:
 
             _raise_for_error_stop(message, agent.model_settings)
 
+            # The model produced no content at all - no text and no tool calls.
+            # That is a degenerate response, not a usable answer, so surface it
+            # rather than returning an empty result that hides a provider
+            # glitch.
+            if not message.parts:
+                raise UnexpectedModelBehaviorError(
+                    "The model returned an empty response with no content."
+                )
+
             generated.append(message)
 
             tool_calls = [p for p in message.parts if isinstance(p, ToolCallPart)]
@@ -234,6 +253,69 @@ class Runner:
             f"Agent did not produce a final response within max_iter={max_iter} "
             "iterations."
         )
+
+    @staticmethod
+    def _validate_input(messages: list[Message]) -> None:
+        """Reject caller input that violates avior's input contract.
+
+        Raised before the first model call, so a contract violation surfaces at
+        the call site as a clear avior usage error rather than reaching the
+        model, where the same fault might fail opaquely on one backend or be
+        silently accepted as a meaningless run on another.  Each fault raises
+        the matching `InvalidInputError` subclass.
+
+        Only faults that hold regardless of the model API are checked; how each
+        model API constrains transcript shape (role ordering, alternation) is
+        enforced by that API and surfaced through the `Provider`, not checked
+        here.
+        """
+
+        if not messages:
+            raise EmptyInputError("The input has no messages to send.")
+
+        # Check each message for content and collect the tool-call and
+        # tool-result `call_id`s.
+        call_ids: set[str] = set()
+        result_ids: set[str] = set()
+        for message in messages:
+            if Runner._is_empty_message(message):
+                raise EmptyInputError(
+                    "The input has a message with no content to send."
+                )
+
+            if isinstance(message, AssistantMessage):
+                call_ids.update(
+                    part.call_id
+                    for part in message.parts
+                    if isinstance(part, ToolCallPart)
+                )
+            elif isinstance(message, ToolMessage):
+                result_ids.update(part.call_id for part in message.parts)
+
+        # Tool calls and results must pair up by `call_id`: every result answers
+        # a call, and every call is answered.
+        if unanswered := call_ids - result_ids:
+            raise UnansweredToolCallError(
+                f"Tool call {sorted(unanswered)[0]!r} has no matching tool result "
+                "in the input."
+            )
+        if orphaned := result_ids - call_ids:
+            raise OrphanedToolResultError(
+                f"Tool result references call_id {sorted(orphaned)[0]!r}, which "
+                "matches no tool call in the input."
+            )
+
+    @staticmethod
+    def _is_empty_message(message: Message) -> bool:
+        """Whether a message carries no content to send."""
+
+        match message:
+            case UserMessage():
+                return not (message.text or "").strip()
+            case AssistantMessage() | ToolMessage():
+                return not message.parts
+            case _:
+                assert_never(message)
 
 
 def _raise_for_error_stop(message: AssistantMessage, settings: ModelSettings) -> None:

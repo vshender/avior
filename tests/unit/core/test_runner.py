@@ -1,24 +1,36 @@
 """Tests for `avior.core.runner`."""
 
+from collections.abc import Sequence
+
 import pytest
 
 from avior.core.agent import Agent
 from avior.core.exceptions import (
     ContentFilterError,
+    EmptyInputError,
     MaxTokensExceededError,
     ModelRefusalError,
+    OrphanedToolResultError,
+    UnansweredToolCallError,
     UnexpectedModelBehaviorError,
 )
 from avior.core.messages import (
     AssistantMessage,
     Message,
     TextPart,
+    ToolCallPart,
+    ToolMessage,
+    ToolResultOk,
+    ToolResultPart,
     UserMessage,
 )
 from avior.core.provider import ModelSettings, ProviderResponse
 from avior.core.runner import Runner
 from avior.core.testing import StubProvider
 from avior.core.usage import Usage
+
+# Basic run tests
+# -----------------------------------------------------------------------------
 
 
 async def test_runner_run_returns_assistant_text_for_hello_smoke() -> None:
@@ -36,6 +48,166 @@ async def test_runner_run_returns_assistant_text_for_hello_smoke() -> None:
 
     # THEN the result's output is the assistant's reply
     assert result.output == "Hi!"
+
+
+# Input-validation tests
+# -----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "bad_input",
+    [
+        pytest.param("", id="empty-str"),
+        pytest.param("   ", id="whitespace-str"),
+        pytest.param([], id="empty-list"),
+        pytest.param([UserMessage.from_text("")], id="empty-user-message"),
+        pytest.param(
+            [UserMessage.from_text("hi"), UserMessage.from_text("")],
+            id="contentful-then-empty",
+        ),
+        pytest.param(
+            [AssistantMessage(parts=[], stop_reason="stop")], id="empty-assistant"
+        ),
+        pytest.param([ToolMessage(parts=[])], id="empty-tool"),
+    ],
+)
+async def test_runner_run_rejects_empty_input(
+    bad_input: str | Sequence[Message],
+) -> None:
+    """`Runner.run` raises `EmptyInputError` for input carrying no content.
+
+    Covers the whole input being empty and an empty message among contentful
+    ones - both would otherwise reach a provider as a request with nothing to
+    send.
+    """
+
+    # GIVEN an agent and a runner whose provider is a recording stub
+    agent = Agent(model_settings=ModelSettings(model="test-model"))
+    provider = StubProvider.from_responses(["unused"])
+    runner = Runner(provider=provider)
+
+    # WHEN `Runner.run` is invoked with empty input
+    # THEN `EmptyInputError` is raised, and the provider was never called
+    with pytest.raises(EmptyInputError):
+        await runner.run(agent, bad_input)
+    assert provider.calls == []
+
+
+async def test_runner_run_rejects_orphaned_tool_result() -> None:
+    """`Runner.run` raises `OrphanedToolResultError` for an unmatched result.
+
+    A tool result whose `call_id` matches no tool call in the input cannot be
+    correlated with a request, so it is rejected up front rather than left to a
+    confusing provider error.
+    """
+
+    # GIVEN a transcript whose tool result references no tool call
+    history: list[Message] = [
+        UserMessage.from_text("weather?"),
+        ToolMessage(
+            parts=[ToolResultPart(call_id="ghost", result=ToolResultOk(content="42"))]
+        ),
+    ]
+    agent = Agent(model_settings=ModelSettings(model="test-model"))
+    provider = StubProvider.from_responses(["unused"])
+    runner = Runner(provider=provider)
+
+    # WHEN `Runner.run` is invoked
+    # THEN `OrphanedToolResultError` is raised, and the provider was never
+    # called
+    with pytest.raises(OrphanedToolResultError):
+        await runner.run(agent, history)
+    assert provider.calls == []
+
+
+async def test_runner_run_accepts_tool_result_matching_a_prior_call() -> None:
+    """A tool result matching a prior tool call passes validation and runs."""
+
+    # GIVEN a continuation whose tool result references a present tool call
+    history: list[Message] = [
+        UserMessage.from_text("weather?"),
+        AssistantMessage(
+            parts=[ToolCallPart(call_id="c1", tool_name="get_weather", args={})],
+            stop_reason="tool_use",
+        ),
+        ToolMessage(
+            parts=[ToolResultPart(call_id="c1", result=ToolResultOk(content="sunny"))]
+        ),
+    ]
+    agent = Agent(model_settings=ModelSettings(model="test-model"))
+    runner = Runner(provider=StubProvider.from_responses(["Final answer"]))
+
+    # WHEN `Runner.run` is invoked
+    result = await runner.run(agent, history)
+
+    # THEN validation passes and the run produces the provider's reply
+    assert result.output == "Final answer"
+
+
+async def test_runner_run_rejects_unanswered_tool_call() -> None:
+    """`Runner.run` raises `UnansweredToolCallError` for an unanswered call.
+
+    A tool call with no matching tool result in the input cannot be continued -
+    the model expects every call it made to be answered.
+    """
+
+    # GIVEN a transcript whose tool call is never answered by a result
+    history: list[Message] = [
+        UserMessage.from_text("weather?"),
+        AssistantMessage(
+            parts=[ToolCallPart(call_id="c1", tool_name="get_weather", args={})],
+            stop_reason="tool_use",
+        ),
+    ]
+    agent = Agent(model_settings=ModelSettings(model="test-model"))
+    provider = StubProvider.from_responses(["unused"])
+    runner = Runner(provider=provider)
+
+    # WHEN `Runner.run` is invoked
+    # THEN `UnansweredToolCallError` is raised, and the provider was never
+    # called
+    with pytest.raises(UnansweredToolCallError):
+        await runner.run(agent, history)
+    assert provider.calls == []
+
+
+async def test_runner_run_accepts_tool_calls_answered_across_messages() -> None:
+    """Tool calls may be answered across separate tool messages, not just one.
+
+    Pairing is by `call_id` coverage, not packaging, so two calls answered by
+    two separate tool messages pass validation.
+    """
+
+    # GIVEN a transcript whose two tool calls are answered by two separate tool
+    # messages
+    history: list[Message] = [
+        UserMessage.from_text("weather and time?"),
+        AssistantMessage(
+            parts=[
+                ToolCallPart(call_id="c1", tool_name="get_weather", args={}),
+                ToolCallPart(call_id="c2", tool_name="get_time", args={}),
+            ],
+            stop_reason="tool_use",
+        ),
+        ToolMessage(
+            parts=[ToolResultPart(call_id="c1", result=ToolResultOk(content="sunny"))]
+        ),
+        ToolMessage(
+            parts=[ToolResultPart(call_id="c2", result=ToolResultOk(content="noon"))]
+        ),
+    ]
+    agent = Agent(model_settings=ModelSettings(model="test-model"))
+    runner = Runner(provider=StubProvider.from_responses(["Final answer"]))
+
+    # WHEN `Runner.run` is invoked
+    result = await runner.run(agent, history)
+
+    # THEN validation passes and the run produces the provider's reply
+    assert result.output == "Final answer"
+
+
+# System-prompt tests
+# -----------------------------------------------------------------------------
 
 
 async def test_runner_run_passes_agent_instructions_as_system_prompt() -> None:
@@ -97,6 +269,10 @@ async def test_runner_run_normalizes_blank_instructions_to_none(
     assert provider.calls[-1].system_prompt is None
 
 
+# Provider request tests
+# -----------------------------------------------------------------------------
+
+
 async def test_runner_run_sends_only_the_user_message_as_input() -> None:
     """`Runner.run` sends the prompt as a user message, not a system one."""
 
@@ -138,8 +314,16 @@ async def test_runner_run_passes_agent_model_settings_to_provider() -> None:
     assert provider.calls[-1].settings is settings
 
 
-async def test_runner_run_returns_empty_string_when_response_has_no_text() -> None:
-    """`Runner.run` returns `""` when the response has no text parts."""
+# Model-response handling tests
+# -----------------------------------------------------------------------------
+
+
+async def test_runner_run_raises_on_empty_response() -> None:
+    """`Runner.run` raises `UnexpectedModelBehaviorError` on an empty response.
+
+    A response with no parts - no text and no tool calls - is degenerate, not a
+    usable answer, so the run surfaces it instead of returning an empty result.
+    """
 
     # GIVEN an agent and a runner whose provider replies with an empty assistant
     # message
@@ -150,11 +334,10 @@ async def test_runner_run_returns_empty_string_when_response_has_no_text() -> No
     empty_response = AssistantMessage(parts=[], stop_reason="stop")
     runner = Runner(provider=StubProvider.from_responses([empty_response]))
 
-    # WHEN the runner is invoked
-    result = await runner.run(agent, "hello")
-
-    # THEN the output is an empty string (not `None`)
-    assert result.output == ""
+    # WHEN `Runner.run` is invoked
+    # THEN it raises `UnexpectedModelBehaviorError`
+    with pytest.raises(UnexpectedModelBehaviorError):
+        await runner.run(agent, "hello")
 
 
 async def test_runner_run_raises_on_max_tokens_stop_reason() -> None:
@@ -283,6 +466,10 @@ async def test_runner_run_accepts_normal_stop_reason() -> None:
     assert result.output == "Hi!"
 
 
+# Usage tests
+# -----------------------------------------------------------------------------
+
+
 async def test_runner_run_carries_usage_from_provider_response() -> None:
     """`Runner.run` surfaces the provider response's usage on the result."""
 
@@ -321,6 +508,10 @@ async def test_runner_run_usage_is_none_when_provider_reports_none() -> None:
 
     # THEN the result's usage is `None`
     assert result.usage is None
+
+
+# Result and conversation-threading tests
+# -----------------------------------------------------------------------------
 
 
 async def test_runner_run_result_excludes_system_prompt_marks_new_turn() -> None:

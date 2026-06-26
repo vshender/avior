@@ -16,7 +16,7 @@ class RunResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     output: str
-    """The assistant's final text response, or `""` if it produced no text."""
+    """The text of the assistant's final response."""
 
     messages: list[Message]
     """Conversation transcript for this run.

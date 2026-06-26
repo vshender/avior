@@ -71,7 +71,7 @@ async def test_runner_run_against_gemini_returns_non_empty_text(
     # GIVEN an agent and a runner using the real Gemini provider
     agent = Agent(
         instructions="Reply with one short word.",
-        model_settings=ModelSettings(model=_MODEL, max_tokens=64),
+        model_settings=ModelSettings(model=_MODEL, max_tokens=256),
     )
 
     # WHEN we run a trivial prompt
