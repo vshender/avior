@@ -91,7 +91,7 @@ requires-dist = [
     { name = "docstring-parser", specifier = ">=0.16" },
     { name = "google-genai", marker = "extra == 'gemini'", specifier = ">=2.7.0" },
     { name = "openai", marker = "extra == 'openai'", specifier = ">=2.0" },
-    { name = "pydantic", specifier = ">=2.10" },
+    { name = "pydantic", specifier = ">=2.10.1" },
     { name = "typing-extensions", specifier = ">=4.12" },
 ]
 provides-extras = ["anthropic", "openai", "gemini", "all"]

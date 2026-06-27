@@ -20,7 +20,7 @@ classifiers = [
 ]
 dependencies = [
     "docstring-parser>=0.16",
-    "pydantic>=2.10",
+    "pydantic>=2.10.1",
     "typing-extensions>=4.12",
 ]
 

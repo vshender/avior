@@ -26,7 +26,7 @@ jobs:
         run: uv python install ${{ matrix.python-version }}
 
       - name: Install dependencies
-        run: uv sync --group dev --all-extras
+        run: uv sync --all-extras --group dev
 
       - name: Ruff check
         run: uv run ruff check
@@ -47,3 +47,45 @@ jobs:
       - name: pytest with coverage gate
         if: matrix.python-version == '3.12'
         run: uv run pytest tests/unit --cov --cov-report=term
+
+  # Exercise the lowest declared versions of the runtime and provider
+  # dependencies, so the `>=` floors in pyproject.toml stay honest.
+  # `lowest-direct` resolves the declared (direct) dependencies to their
+  # lowest allowed versions, and their transitive dependencies to the highest
+  # versions still compatible with that floored set.
+  #
+  # Dev tooling is installed at current versions under a constraint built
+  # from the floored set, so the checks use newer tools without pulling
+  # shared dependencies above the floors.  If a current dev tool needs a newer
+  # shared dependency, this step fails -- the signal to raise the corresponding
+  # floor.
+  min-versions:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+
+      - name: Install lowest-direct project dependencies
+        run: uv sync --resolution lowest-direct --all-extras --no-group dev
+
+      - name: Install current dev tooling, pinned to the floored set
+        run: |
+          uv pip freeze --exclude-editable > /tmp/floored-constraints.txt
+          uv pip install --group dev --constraint /tmp/floored-constraints.txt
+
+      - name: basedpyright
+        run: uv run --no-sync basedpyright
+
+      - name: mypy
+        run: uv run --no-sync mypy
+
+      - name: pytest
+        run: uv run --no-sync pytest tests/unit
