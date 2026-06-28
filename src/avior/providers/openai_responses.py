@@ -52,6 +52,7 @@ from avior.core.messages import (
     Message,
     StopReason,
     TextPart,
+    ThinkingPart,
     ToolCallPart,
     ToolMessage,
     UserMessage,
@@ -74,10 +75,10 @@ class OpenAIResponsesProvider(Provider):
     Known limitation - reasoning items: reasoning models (e.g. the o-series)
     return reasoning items in their output, and with server-side state disabled
     (`store=False`) OpenAI expects those items sent back on a follow-up request,
-    especially next to tool calls.  The canonical IR has no slot for them yet,
-    so they are dropped.  A single-turn answer still works, but a tool call from
-    a reasoning model may be rejected on the continuation request that returns
-    the tool result.
+    especially next to tool calls.  This provider does not decode them into the
+    transcript, so they are dropped.  A single-turn answer still works, but a
+    tool call from a reasoning model may be rejected on the continuation request
+    that returns the tool result.
     """
 
     def __init__(
@@ -105,6 +106,12 @@ class OpenAIResponsesProvider(Provider):
         else:
             self._client = AsyncOpenAI(api_key=api_key)
             self._owns_client = True
+
+    @property
+    def name(self) -> str:
+        """The provider's canonical name."""
+
+        return "openai"
 
     async def complete(
         self,
@@ -222,10 +229,11 @@ class OpenAIResponsesProvider(Provider):
                     parts.append(self._to_tool_call_part(item))
 
             elif isinstance(item, ResponseReasoningItem):
-                # Reasoning items appear by default for reasoning models.  The
-                # canonical IR has no slot for them yet, so they are skipped -
-                # not raised - to keep reasoning models working for single-turn
-                # use.  See the class docstring for the continuation limitation.
+                # Reasoning items appear by default for reasoning models.  This
+                # provider does not decode them into the transcript, so they are
+                # skipped - not raised - to keep reasoning models working for
+                # single-turn use.  See the class docstring for the continuation
+                # limitation.
                 continue
 
             else:
@@ -263,12 +271,16 @@ class OpenAIResponsesProvider(Provider):
         )
 
         return ProviderResponse(
-            message=AssistantMessage(parts=final_parts, stop_reason=stop_reason),
+            message=AssistantMessage(
+                parts=final_parts,
+                stop_reason=stop_reason,
+                provider_name=self.name,
+            ),
             usage=self._map_usage(response.usage),
             raw_usage=raw_usage,
             response_id=response.id,
             model=response.model,
-            provider_name="openai",
+            provider_name=self.name,
         )
 
     async def aclose(self) -> None:
@@ -480,15 +492,28 @@ class OpenAIResponsesProvider(Provider):
                     )
 
                 for part in message.parts:
-                    if isinstance(part, ToolCallPart):
-                        items.append(
-                            ResponseFunctionToolCallParam(
-                                type="function_call",
-                                call_id=part.call_id,
-                                name=part.tool_name,
-                                arguments=json.dumps(part.args),
+                    match part:
+                        case ToolCallPart():
+                            items.append(
+                                ResponseFunctionToolCallParam(
+                                    type="function_call",
+                                    call_id=part.call_id,
+                                    name=part.tool_name,
+                                    arguments=json.dumps(part.args),
+                                )
                             )
-                        )
+                        case TextPart():
+                            # Text parts are already collected into a single
+                            # assistant message item above.
+                            continue
+                        case ThinkingPart():
+                            # Reasoning items are not decoded or echoed, so skip
+                            # them.  This is also correct for an item from a
+                            # different provider, whose opaque token must never
+                            # be sent to OpenAI.
+                            continue
+                        case _:
+                            assert_never(part)
 
                 return items
 

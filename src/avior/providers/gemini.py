@@ -32,6 +32,7 @@ from avior.core.messages import (
     Message,
     StopReason,
     TextPart,
+    ThinkingPart,
     ToolCallPart,
     ToolMessage,
     UserMessage,
@@ -95,6 +96,12 @@ class GeminiProvider(Provider):
         else:
             self._client = genai.Client(api_key=api_key)
             self._owns_client = True
+
+    @property
+    def name(self) -> str:
+        """The provider's canonical name."""
+
+        return "gemini"
 
     async def complete(
         self,
@@ -294,7 +301,11 @@ class GeminiProvider(Provider):
             logger.warning("Gemini finished abnormally: %s", reason)
 
         return ProviderResponse(
-            message=AssistantMessage(parts=parts, stop_reason=stop_reason),
+            message=AssistantMessage(
+                parts=parts,
+                stop_reason=stop_reason,
+                provider_name=self.name,
+            ),
             usage=self._map_usage(response.usage_metadata),
             raw_usage=(
                 response.usage_metadata.model_dump(mode="json")
@@ -303,7 +314,7 @@ class GeminiProvider(Provider):
             ),
             response_id=response.response_id,
             model=response.model_version,
-            provider_name="gemini",
+            provider_name=self.name,
         )
 
     async def aclose(self) -> None:
@@ -539,6 +550,12 @@ class GeminiProvider(Provider):
                                     )
                                 )
                             )
+                        case ThinkingPart():
+                            # Thought parts are not decoded or echoed, so skip
+                            # them.  This is also correct for a thought from a
+                            # different provider, whose opaque token must never
+                            # be sent to Gemini.
+                            continue
                         case _:
                             assert_never(part)
 

@@ -531,11 +531,19 @@ async def test_runner_run_result_excludes_system_prompt_marks_new_turn() -> None
     # reply, with no system prompt
     assert result.messages == [
         UserMessage.from_text("hello"),
-        AssistantMessage(parts=[TextPart(text="Hi!")], stop_reason="stop"),
+        AssistantMessage(
+            parts=[TextPart(text="Hi!")],
+            stop_reason="stop",
+            provider_name="stub",
+        ),
     ]
     # AND `new_messages` is just the run's output
     assert result.new_messages == [
-        AssistantMessage(parts=[TextPart(text="Hi!")], stop_reason="stop"),
+        AssistantMessage(
+            parts=[TextPart(text="Hi!")],
+            stop_reason="stop",
+            provider_name="stub",
+        ),
     ]
 
 
@@ -565,7 +573,11 @@ async def test_runner_run_accepts_message_list_input() -> None:
     assert provider.calls[-1].system_prompt == "you are helpful"
 
     # AND the result extends the transcript with the new reply, marking it new
-    new_reply = AssistantMessage(parts=[TextPart(text="I'm well.")], stop_reason="stop")
+    new_reply = AssistantMessage(
+        parts=[TextPart(text="I'm well.")],
+        stop_reason="stop",
+        provider_name="stub",
+    )
     assert result.messages == [*history, new_reply]
     assert result.new_messages == [new_reply]
 
@@ -589,10 +601,18 @@ async def test_runner_run_threads_result_messages_into_next_run() -> None:
     # prompt in the transcript; instructions ride separately)
     assert provider.calls[-1].messages == [
         UserMessage.from_text("Q1"),
-        AssistantMessage(parts=[TextPart(text="A1")], stop_reason="stop"),
+        AssistantMessage(
+            parts=[TextPart(text="A1")],
+            stop_reason="stop",
+            provider_name="stub",
+        ),
         UserMessage.from_text("Q2"),
     ]
     # AND the second result's `new_messages` is only its own reply
     assert second.new_messages == [
-        AssistantMessage(parts=[TextPart(text="A2")], stop_reason="stop"),
+        AssistantMessage(
+            parts=[TextPart(text="A2")],
+            stop_reason="stop",
+            provider_name="stub",
+        ),
     ]

@@ -42,6 +42,7 @@ from avior.core.messages import (
     Message,
     StopReason,
     TextPart,
+    ThinkingPart,
     ToolCallPart,
     ToolMessage,
     UserMessage,
@@ -90,6 +91,12 @@ class AnthropicProvider(Provider):
         else:
             self._client = AsyncAnthropic(api_key=api_key)
             self._owns_client = True
+
+    @property
+    def name(self) -> str:
+        """The provider's canonical name."""
+
+        return "anthropic"
 
     async def complete(
         self,
@@ -229,12 +236,16 @@ class AnthropicProvider(Provider):
             )
 
         return ProviderResponse(
-            message=AssistantMessage(parts=parts, stop_reason=stop_reason),
+            message=AssistantMessage(
+                parts=parts,
+                stop_reason=stop_reason,
+                provider_name=self.name,
+            ),
             usage=self._map_usage(response.usage),
             raw_usage=response.usage.model_dump(mode="json"),
             response_id=response.id,
             model=response.model,
-            provider_name="anthropic",
+            provider_name=self.name,
         )
 
     async def aclose(self) -> None:
@@ -361,6 +372,12 @@ class AnthropicProvider(Provider):
                                     input=part.args,
                                 )
                             )
+                        case ThinkingPart():
+                            # Reasoning blocks are not decoded or echoed, so
+                            # skip them.  This is also correct for a block from
+                            # a different provider, whose opaque token must
+                            # never be sent to Anthropic.
+                            continue
                         case _:
                             assert_never(part)
 

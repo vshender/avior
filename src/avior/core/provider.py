@@ -94,6 +94,15 @@ class Provider(ABC):
 
         self._entered_count = 0
 
+    @property
+    @abstractmethod
+    def name(self) -> str:
+        """The provider's canonical name.
+
+        A short, stable identifier used to record which provider produced a
+        turn.
+        """
+
     @abstractmethod
     async def complete(
         self,

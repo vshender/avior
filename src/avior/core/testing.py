@@ -20,7 +20,7 @@ type StubResponse = str | AssistantMessage | ProviderResponse
 """A scripted response, in one of three forms:
 
 - A `str` is sugar for a single-`TextPart` `AssistantMessage` with
-  `stop_reason="stop"`.
+  `stop_reason="stop"`, tagged with the stub's `provider_name`.
 - An `AssistantMessage` is sugar for a `ProviderResponse` that wraps it with
   no call metadata.
 - A `ProviderResponse` is used as-is, so a test can script the call metadata
@@ -148,6 +148,12 @@ class StubProvider(Provider):
         self._func = func
         self.calls: list[StubCall] = []
 
+    @property
+    def name(self) -> str:
+        """The provider's canonical name."""
+
+        return "stub"
+
     @classmethod
     def from_responses(cls, responses: Sequence[StubResponse]) -> Self:
         """Construct a stub that returns each response in order, one per call.
@@ -259,8 +265,7 @@ class StubProvider(Provider):
 
         pass
 
-    @staticmethod
-    def _normalize_response(response: StubResponse) -> ProviderResponse:
+    def _normalize_response(self, response: StubResponse) -> ProviderResponse:
         """Coerce any scripted `StubResponse` to a `ProviderResponse`.
 
         Args:
@@ -268,14 +273,17 @@ class StubProvider(Provider):
                 `ProviderResponse`.
 
         Returns:
-            A `ProviderResponse` ready to be returned from `Provider.complete`.
-            The sugar forms (`str`, `AssistantMessage`) carry no call metadata.
+            A `ProviderResponse` ready to be returned from `Provider.complete`,
+            with no call metadata (usage, response id).  The message built from
+            the `str` form is tagged with the stub's `provider_name`; the
+            `AssistantMessage` and `ProviderResponse` forms are used as given.
         """
 
         if isinstance(response, str):
             message = AssistantMessage(
                 parts=[TextPart(text=response)],
                 stop_reason="stop",
+                provider_name=self.name,
             )
             return ProviderResponse(message=message)
         elif isinstance(response, AssistantMessage):

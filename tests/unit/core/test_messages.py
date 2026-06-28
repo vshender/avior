@@ -3,10 +3,11 @@
 from avior.core.messages import (
     AssistantMessage,
     TextPart,
+    ThinkingPart,
     UserMessage,
 )
 
-# UserMessage tests
+# `UserMessage` tests
 # -----------------------------------------------------------------------------
 
 
@@ -62,7 +63,7 @@ def test_user_message_text_returns_none_for_empty_parts() -> None:
     assert result is None
 
 
-# AssistantMessage tests
+# `AssistantMessage` tests
 # -----------------------------------------------------------------------------
 
 
@@ -106,3 +107,19 @@ def test_assistant_message_text_returns_none_for_empty_parts() -> None:
 
     # THEN the result is `None`
     assert result is None
+
+
+def test_assistant_message_text_ignores_thinking_parts() -> None:
+    """`AssistantMessage.text` skips `ThinkingPart`s, returning only text."""
+
+    # GIVEN an assistant message with a thinking part and a text part
+    message = AssistantMessage(
+        parts=[ThinkingPart(content="reasoning"), TextPart(text="answer")],
+        stop_reason="stop",
+    )
+
+    # WHEN the `text` property is read
+    result = message.text
+
+    # THEN only the text part contributes
+    assert result == "answer"

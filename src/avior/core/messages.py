@@ -76,6 +76,24 @@ class ToolCallPart(BaseModel):
     args: dict[str, Any]
     """The raw arguments object the LLM produced."""
 
+    provider_details: dict[str, Any] | None = None
+    """Opaque provider data the model expects to receive back unchanged on a
+    later turn.  Carries the provider's round-trip token for the call - for
+    example a Gemini `thought_signature`, which the Gemini API checks on replay
+    to keep a multi-step tool chain valid.
+
+    A provider sets it on the calls it produces; the turn's `provider_name`
+    records the owner, so the data is sent back only to that same provider.  A
+    different provider drops it, since the token is provider-specific and
+    non-portable.
+
+    Values must be JSON-serializable so a transcript can be persisted; a binary
+    token (for example base64) is encoded by the provider that stores it.
+
+    Despite the message being frozen, the dict's contents are not - do not
+    mutate them in place.
+    """
+
 
 class ToolResultOk(BaseModel):
     """A successful tool call's result."""
@@ -134,14 +152,50 @@ class ToolResultPart(BaseModel):
         return cls(call_id=call_id, result=ToolResultError(content=message))
 
 
+class ThinkingPart(BaseModel):
+    """A reasoning step a model emitted, part of an assistant turn.
+
+    Models that reason expose it as its own content block (Anthropic thinking,
+    OpenAI reasoning items, Gemini thought parts).  A block can be text-less: a
+    provider may return only the opaque round-trip token, with no summary.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: Literal["thinking"] = "thinking"
+
+    content: str
+    """The reasoning summary text; may be empty."""
+
+    provider_details: dict[str, Any] | None = None
+    """Opaque provider data the model expects to receive back unchanged on a
+    later turn.  Carries the provider's round-trip token for the reasoning
+    step - for example an Anthropic `signature`, an OpenAI reasoning item's `id`
+    and `encrypted_content`, or a Gemini `thought_signature`.
+
+    A provider sets it on the blocks it produces; the turn's `provider_name`
+    records the owner, so the data is sent back only to that same provider.  A
+    different provider drops it, since the token is provider-specific and
+    non-portable.
+
+    Values must be JSON-serializable so a transcript can be persisted; a binary
+    token (for example base64) is encoded by the provider that stores it.
+
+    Despite the message being frozen, the dict's contents are not - do not
+    mutate them in place.
+    """
+
+
 type AssistantPart = Annotated[
-    TextPart | ToolCallPart,
+    TextPart | ToolCallPart | ThinkingPart,
     Field(discriminator="kind"),
 ]
-"""A content part of an assistant turn: text, or a request to call a tool."""
+"""A content part of an assistant turn: text, a request to call a tool, or a
+reasoning step.
+"""
 
 type Part = Annotated[
-    TextPart | ToolCallPart | ToolResultPart,
+    TextPart | ToolCallPart | ThinkingPart | ToolResultPart,
     Field(discriminator="kind"),
 ]
 """Any typed content part of a message.  Discriminated on `kind`."""
@@ -178,19 +232,29 @@ class AssistantMessage(BaseModel):
     kind: Literal["assistant"] = "assistant"
 
     parts: list[AssistantPart]
-    """The assistant's content: text and tool-call parts."""
+    """The assistant's content parts."""
 
     stop_reason: StopReason
     """Why the model stopped (see `StopReason`); always set by `Provider`
     adapters when building the message from a provider response.
     """
 
+    provider_name: str | None = None
+    """Name of the provider that produced this turn, or `None` for a turn built
+    by hand rather than by a provider.  A turn replayed from a stored transcript
+    keeps the provider name it was produced with.
+
+    It records which provider's opaque part data the turn carries, so that data
+    is sent back only to that same provider and never replayed to a different
+    one.
+    """
+
     @property
     def text(self) -> str | None:
         """Concatenated text of the message's `TextPart`s, or `None` if none.
 
-        Tool-call parts are ignored, so this is the assistant's natural-language
-        text alongside any tool requests.
+        Non-text parts are ignored, so this is the assistant's natural-language
+        text alongside any tool requests or reasoning.
         """
 
         texts = [p.text for p in self.parts if isinstance(p, TextPart)]
