@@ -3,9 +3,9 @@
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from types import TracebackType
-from typing import Any, Self
+from typing import Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from avior.core.messages import AssistantMessage, Message
 from avior.core.tools import Tool
@@ -25,6 +25,40 @@ class ModelSettings(BaseModel):
 
     max_tokens: int | None = None
     """Maximum output tokens; `None` uses the provider's default."""
+
+    thinking: bool | Literal["low", "medium", "high"] | None = None
+    """A portable control for reasoning / thinking; each provider maps it to
+    its native reasoning setting.
+
+    - `None` - unset; no thinking setting is sent, so the chosen model's own
+      default applies.
+    - `True` - enable thinking at the provider's default depth (the provider
+      chooses how much).
+    - `False` - disable thinking.
+    - `"low"` / `"medium"` / `"high"` - enable thinking at the given depth.
+
+    The `None` default is provider- and model-specific: some models reason by
+    default, some only when asked, and some always reason and cannot be turned
+    off.  Check the chosen model's documentation for its default.
+
+    The levels are the portable common denominator across providers; for a
+    provider-specific depth or raw configuration use `provider_options`, which
+    takes precedence over this field.
+    """
+
+    provider_options: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    """Raw, provider-specific settings, keyed by provider name (the value of
+    `Provider.name`, for example `"anthropic"`).
+
+    Use it for provider-specific settings the portable fields above do not
+    cover.  A provider reads only its own slice, so the dict can hold slices for
+    several providers; slices keyed for other providers, or misspelled keys, are
+    dropped without error.  A provider's own slice takes precedence over the
+    portable fields where they overlap.
+
+    Despite `ModelSettings` being frozen, the nested dicts are not - do not
+    mutate them after construction.
+    """
 
 
 class ProviderResponse(BaseModel):
