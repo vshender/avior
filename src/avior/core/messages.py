@@ -12,9 +12,9 @@ Provider adapters translate between this canonical form and the wire shape of
 the underlying API.
 """
 
-from typing import Annotated, Any, Literal, Self
+from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 type StopReason = Literal[
     "stop",
@@ -63,7 +63,7 @@ class TextPart(BaseModel):
 class ToolCallPart(BaseModel):
     """A request from the LLM to call a tool, part of an assistant turn."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, allow_inf_nan=False)
 
     kind: Literal["tool_call"] = "tool_call"
 
@@ -73,10 +73,10 @@ class ToolCallPart(BaseModel):
     tool_name: str
     """The name of the tool the LLM wants to call."""
 
-    args: dict[str, Any]
+    args: dict[str, JsonValue]
     """The raw arguments object the LLM produced."""
 
-    provider_details: dict[str, Any] | None = None
+    provider_details: dict[str, JsonValue] | None = None
     """Opaque provider data the model expects to receive back unchanged on a
     later turn.  Carries the provider's round-trip token for the call - for
     example a Gemini `thought_signature`, which the Gemini API checks on replay
@@ -86,9 +86,6 @@ class ToolCallPart(BaseModel):
     records the owner, so the data is sent back only to that same provider.  A
     different provider drops it, since the token is provider-specific and
     non-portable.
-
-    Values must be JSON-serializable so a transcript can be persisted; a binary
-    token (for example base64) is encoded by the provider that stores it.
 
     Despite the message being frozen, the dict's contents are not - do not
     mutate them in place.
@@ -160,14 +157,14 @@ class ThinkingPart(BaseModel):
     provider may return only the opaque round-trip token, with no summary.
     """
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, allow_inf_nan=False)
 
     kind: Literal["thinking"] = "thinking"
 
     content: str
     """The reasoning summary text; may be empty."""
 
-    provider_details: dict[str, Any] | None = None
+    provider_details: dict[str, JsonValue] | None = None
     """Opaque provider data the model expects to receive back unchanged on a
     later turn.  Carries the provider's round-trip token for the reasoning
     step - for example an Anthropic `signature`, an OpenAI reasoning item's `id`
@@ -177,9 +174,6 @@ class ThinkingPart(BaseModel):
     records the owner, so the data is sent back only to that same provider.  A
     different provider drops it, since the token is provider-specific and
     non-portable.
-
-    Values must be JSON-serializable so a transcript can be persisted; a binary
-    token (for example base64) is encoded by the provider that stores it.
 
     Despite the message being frozen, the dict's contents are not - do not
     mutate them in place.

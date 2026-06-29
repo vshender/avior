@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, JsonValue
 
 from avior.core.agent import Agent
 from avior.core.context import RunContext
@@ -52,7 +52,7 @@ def _agent(*, max_iter: int = 10) -> Agent:
 def _tool_call(
     call_id: str,
     tool_name: str,
-    args: dict[str, object],
+    args: dict[str, JsonValue],
 ) -> AssistantMessage:
     """Build an assistant message requesting a single tool call."""
 

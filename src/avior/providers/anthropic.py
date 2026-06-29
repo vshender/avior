@@ -364,12 +364,15 @@ class AnthropicProvider(Provider):
                                 TextBlockParam(type="text", text=part.text)
                             )
                         case ToolCallPart():
+                            # Cast our `dict[str, JsonValue]` to the SDK's wider
+                            # `dict[str, object]`: `dict` is invariant in its
+                            # value, and every `JsonValue` is a Python `object`.
                             asst_content.append(
                                 ToolUseBlockParam(
                                     type="tool_use",
                                     id=part.call_id,
                                     name=part.tool_name,
-                                    input=part.args,
+                                    input=cast(dict[str, object], part.args),
                                 )
                             )
                         case ThinkingPart():

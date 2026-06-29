@@ -5,7 +5,7 @@ from collections.abc import Sequence
 from types import TracebackType
 from typing import Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from avior.core.messages import AssistantMessage, Message
 from avior.core.tools import Tool
@@ -16,7 +16,7 @@ from avior.core.warnings import RunWarning
 class ModelSettings(BaseModel):
     """Per-call model invocation settings."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, allow_inf_nan=False)
 
     model: str
     """The model to use (a provider-specific identifier)."""
@@ -47,7 +47,7 @@ class ModelSettings(BaseModel):
     takes precedence over this field.
     """
 
-    provider_options: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    provider_options: dict[str, dict[str, JsonValue]] = Field(default_factory=dict)
     """Raw, provider-specific settings, keyed by provider name (the value of
     `Provider.name`, for example `"anthropic"`).
 

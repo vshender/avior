@@ -22,7 +22,7 @@ _MAX_VALUE_REPR_LEN = 60
 class UnsupportedSettingRunWarning(BaseModel):
     """A setting the chosen model could not honor."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, allow_inf_nan=False)
 
     type: Literal["unsupported_setting"] = "unsupported_setting"
     """Discriminator identifying this warning kind."""
