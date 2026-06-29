@@ -32,6 +32,7 @@ from avior.core.provider import ModelSettings, Provider
 from avior.core.result import RunResult
 from avior.core.tools import Tool
 from avior.core.usage import Usage
+from avior.core.warnings import RunWarning, WarningHandler, log_warning
 
 # Binds the agent's deps type to the `deps` argument of `run`.  Explicit
 # `TypeVar` (Python 3.12 has no `def run[Deps = None]` default syntax); a
@@ -56,16 +57,29 @@ class Runner:
     across runners.  The runner is therefore not itself a context manager.
     """
 
-    def __init__(self, *, provider: Provider) -> None:
+    def __init__(
+        self,
+        *,
+        provider: Provider,
+        warning_handlers: Sequence[WarningHandler] | None = None,
+    ) -> None:
         """Build a runner that drives agents against `provider`.
 
         Args:
             provider: The `Provider` that performs every model call this runner
                 makes.  The runner borrows it - the caller owns its lifecycle
                 (see the class docstring).
+            warning_handlers: Functions that process each `RunWarning` the run
+                produces, for example by logging it.  Called once per warning,
+                in order; if a handler raises, the exception propagates and
+                aborts the run.  `None` installs a single handler that logs each
+                warning; `[]` drops warnings silently.
         """
 
         self.provider = provider
+        self._warning_handlers: tuple[WarningHandler, ...] = (
+            (log_warning,) if warning_handlers is None else tuple(warning_handlers)
+        )
 
     # `deps` is optional for an agent that declares no dependencies, i.e. when
     # `Deps` is:
@@ -138,8 +152,7 @@ class Runner:
             max_iter: Maximum loop iterations; defaults to `agent.max_iter`.
 
         Returns:
-            A `RunResult` with the assistant's final text, the conversation
-            transcript, and the run's token usage.
+            A `RunResult` for the run.
 
         Raises:
             MissingDependenciesError: `deps_type` is set but `deps` is missing.
@@ -155,6 +168,8 @@ class Runner:
                 without a usable response - the `"error"` stop reason, or a
                 response with no content (no text and no tool calls).
             MaxIterationsExceeded: The loop hit `max_iter` without finishing.
+            Exception: A warning handler that raises aborts the run; its
+                exception propagates unchanged.
         """
 
         # `deps` is required only for a concrete dependency type.  `None`/
@@ -207,6 +222,7 @@ class Runner:
 
         generated: list[Message] = []
         usages: list[Usage] = []
+        warnings: list[RunWarning] = []
         for run_step in range(1, max_iter + 1):
             messages: list[Message] = [*input_messages, *generated]
             response = await self.provider.complete(
@@ -216,16 +232,25 @@ class Runner:
                 system_prompt=system_prompt,
             )
             message = response.message
+
             if response.usage is not None:
                 usages.append(response.usage)
 
+            # Run warnings through the handlers before the error-stop check, so
+            # a degraded response's warnings are observed even if it then fails.
+            for warning in response.warnings:
+                for handler in self._warning_handlers:
+                    handler(warning)
+
+            warnings.extend(response.warnings)
+
             self._raise_for_error_stop(message, agent.model_settings)
 
-            # The model produced no content at all - no text and no tool calls.
-            # That is a degenerate response, not a usable answer, so surface it
-            # rather than returning an empty result that hides a provider
-            # glitch.
             if not message.parts:
+                # The model produced no content at all - no text and no tool
+                # calls.  That is a degenerate response, not a usable answer, so
+                # surface it rather than returning an empty result that hides a
+                # provider glitch.
                 raise UnexpectedModelBehaviorError(
                     "The model returned an empty response with no content."
                 )
@@ -239,6 +264,7 @@ class Runner:
                     messages=[*input_messages, *generated],
                     new_message_index=len(input_messages),
                     usage=Usage.sum(usages) if usages else None,
+                    warnings=warnings,
                 )
 
             results = [

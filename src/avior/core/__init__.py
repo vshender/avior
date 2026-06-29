@@ -30,6 +30,7 @@ from avior.core.result import RunResult
 from avior.core.runner import Runner
 from avior.core.tools import Tool, tool
 from avior.core.usage import Usage
+from avior.core.warnings import RunWarning, WarningHandler
 
 __all__ = [
     "Agent",
@@ -41,6 +42,7 @@ __all__ = [
     "ProviderResponse",
     "RunContext",
     "RunResult",
+    "RunWarning",
     "Runner",
     "StopReason",
     "TextPart",
@@ -54,5 +56,6 @@ __all__ = [
     "ToolResultPart",
     "Usage",
     "UserMessage",
+    "WarningHandler",
     "tool",
 ]

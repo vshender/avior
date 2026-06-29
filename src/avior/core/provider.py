@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from avior.core.messages import AssistantMessage, Message
 from avior.core.tools import Tool
 from avior.core.usage import Usage
+from avior.core.warnings import RunWarning
 
 
 class ModelSettings(BaseModel):
@@ -100,6 +101,11 @@ class ProviderResponse(BaseModel):
 
     provider_name: str | None = None
     """Name of the provider that produced this response."""
+
+    warnings: list[RunWarning] = Field(default_factory=list)
+    """Non-fatal problems found while serving this call, for example a setting
+    the model could not honor.  The runner drains them.
+    """
 
 
 class Provider(ABC):

@@ -1,5 +1,6 @@
 """Tests for `avior.core.runner`."""
 
+import logging
 from collections.abc import Sequence
 
 import pytest
@@ -27,7 +28,9 @@ from avior.core.messages import (
 from avior.core.provider import ModelSettings, ProviderResponse
 from avior.core.runner import Runner
 from avior.core.testing import StubProvider
+from avior.core.tools import tool
 from avior.core.usage import Usage
+from avior.core.warnings import UnsupportedSettingRunWarning
 
 # Basic run tests
 # -----------------------------------------------------------------------------
@@ -616,3 +619,163 @@ async def test_runner_run_threads_result_messages_into_next_run() -> None:
             provider_name="stub",
         ),
     ]
+
+
+# Warning handling
+# -----------------------------------------------------------------------------
+
+
+def _a_warning() -> UnsupportedSettingRunWarning:
+    """A sample unsupported-setting warning."""
+
+    return UnsupportedSettingRunWarning(
+        setting_name="thinking",
+        setting_value="high",
+        provider="stub",
+        model="test-model",
+    )
+
+
+def _provider_carrying(
+    warning: UnsupportedSettingRunWarning,
+) -> StubProvider:
+    """A stub provider whose single reply carries `warning`."""
+
+    return StubProvider.from_responses(
+        [
+            ProviderResponse(
+                message=AssistantMessage(
+                    parts=[TextPart(text="ok")],
+                    stop_reason="stop",
+                ),
+                warnings=[warning],
+            )
+        ]
+    )
+
+
+async def test_runner_run_collects_provider_warnings_into_result() -> None:
+    """`Runner.run` collects the provider's warnings onto the result."""
+
+    # GIVEN a warning and a provider whose reply carries it
+    warning = _a_warning()
+    provider = _provider_carrying(warning)
+    agent = Agent(model_settings=ModelSettings(model="test-model"))
+    runner = Runner(provider=provider)
+
+    # WHEN `Runner.run` is awaited
+    result = await runner.run(agent, "go")
+
+    # THEN the result carries the provider's warning
+    assert result.warnings == [warning]
+
+
+async def test_runner_run_accumulates_warnings_across_iterations() -> None:
+    """`Runner.run` collects warnings from every model call in the loop."""
+
+    # GIVEN a tool and a provider scripted to call it then give a final reply,
+    # each turn carrying a warning
+    @tool
+    def ping() -> str:
+        """Return a fixed token."""
+
+        return "pong"
+
+    first_warning = UnsupportedSettingRunWarning(
+        setting_name="thinking",
+        setting_value="high",
+        provider="stub",
+        model="test-model",
+    )
+    second_warning = UnsupportedSettingRunWarning(
+        setting_name="temperature",
+        setting_value=0.7,
+        provider="stub",
+        model="test-model",
+    )
+    provider = StubProvider.from_responses(
+        [
+            ProviderResponse(
+                message=AssistantMessage(
+                    parts=[ToolCallPart(call_id="c1", tool_name="ping", args={})],
+                    stop_reason="tool_use",
+                ),
+                warnings=[first_warning],
+            ),
+            ProviderResponse(
+                message=AssistantMessage(
+                    parts=[TextPart(text="done")], stop_reason="stop"
+                ),
+                warnings=[second_warning],
+            ),
+        ]
+    )
+    agent = Agent(model_settings=ModelSettings(model="test-model"), tools=[ping])
+    runner = Runner(provider=provider)
+
+    # WHEN `Runner.run` is awaited
+    result = await runner.run(agent, "go")
+
+    # THEN both warnings are collected in iteration order
+    assert result.warnings == [first_warning, second_warning]
+
+
+async def test_runner_run_passes_each_warning_to_the_handlers() -> None:
+    """`Runner.run` passes each provider warning to the warning handlers."""
+
+    # GIVEN a recording handler and a provider whose reply carries a warning
+    recorded: list[UnsupportedSettingRunWarning] = []
+    handler = recorded.append
+    warning = _a_warning()
+    provider = _provider_carrying(warning)
+    agent = Agent(model_settings=ModelSettings(model="test-model"))
+    runner = Runner(provider=provider, warning_handlers=[handler])
+
+    # WHEN `Runner.run` is invoked
+    await runner.run(agent, "go")
+
+    # THEN the handler received the warning
+    assert recorded == [warning]
+
+
+async def test_runner_run_aborts_when_a_warning_handler_raises() -> None:
+    """A warning handler that raises aborts the run with its exception."""
+
+    # GIVEN a handler that raises and a provider whose reply carries a warning
+    class HandlerError(Exception):
+        """Raised by the handler under test."""
+
+    def raising_handler(warning: UnsupportedSettingRunWarning) -> None:
+        raise HandlerError(warning.message)
+
+    warning = _a_warning()
+    provider = _provider_carrying(warning)
+    agent = Agent(model_settings=ModelSettings(model="test-model"))
+    runner = Runner(provider=provider, warning_handlers=[raising_handler])
+
+    # WHEN `Runner.run` is invoked
+    # THEN the handler's exception aborts the run
+    with pytest.raises(HandlerError):
+        await runner.run(agent, "go")
+
+
+async def test_runner_run_default_handler_logs_warnings(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The default warning handler logs each warning at the warning level."""
+
+    # GIVEN a default runner and a provider whose reply carries a warning
+    warning = _a_warning()
+    provider = _provider_carrying(warning)
+    agent = Agent(model_settings=ModelSettings(model="test-model"))
+    runner = Runner(provider=provider)
+
+    # WHEN `Runner.run` is invoked with logging captured
+    with caplog.at_level(logging.WARNING, logger="avior.core.warnings"):
+        await runner.run(agent, "go")
+
+    # THEN the warning is logged at the warning level
+    assert any(
+        record.levelno == logging.WARNING and "thinking" in record.getMessage()
+        for record in caplog.records
+    )

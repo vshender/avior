@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from avior.core.messages import Message
 from avior.core.usage import Usage
+from avior.core.warnings import RunWarning
 
 
 class RunResult(BaseModel):
@@ -38,6 +39,9 @@ class RunResult(BaseModel):
     """Normalized token usage for the whole run, or `None` if the provider
     reported none.
     """
+
+    warnings: list[RunWarning] = Field(default_factory=list)
+    """Non-fatal problems found during the run, in the order they occurred."""
 
     @property
     def new_messages(self) -> list[Message]:
