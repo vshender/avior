@@ -2,6 +2,7 @@
 
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
+from dataclasses import dataclass
 from types import TracebackType
 from typing import Any, Literal, Self
 
@@ -108,6 +109,21 @@ class ProviderResponse(BaseModel):
     """
 
 
+@dataclass(frozen=True)
+class ModelCapabilities:
+    """The features a model supports.
+
+    These flags let the runtime adapt to what a model supports (such as
+    reasoning) instead of sending a request the model cannot handle.
+
+    Conservative by default: every capability is off unless a provider reports
+    otherwise for a model it knows.  An unknown model keeps these defaults.
+    """
+
+    supports_thinking: bool = False
+    """Whether the model accepts a reasoning / thinking configuration."""
+
+
 class Provider(ABC):
     """Adapter to an LLM service.
 
@@ -184,6 +200,17 @@ class Provider(ABC):
         Subclasses must implement this to be idempotent: calling `aclose`
         more than once must be safe.
         """
+
+    def model_capabilities(self, model: str) -> ModelCapabilities:
+        """Report what `model` supports.
+
+        The base implementation returns the conservative default (every
+        capability off) for any model.  A provider overrides this to report the
+        real capabilities of the models it knows - typically by matching the
+        model name - and returns the default for a name it does not recognize.
+        """
+
+        return ModelCapabilities()
 
     async def __aenter__(self) -> Self:
         """Enter the provider as an async context manager.

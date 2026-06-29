@@ -25,7 +25,12 @@ from avior.core.messages import (
     ToolResultPart,
     UserMessage,
 )
-from avior.core.provider import ModelSettings, Provider, ProviderResponse
+from avior.core.provider import (
+    ModelCapabilities,
+    ModelSettings,
+    Provider,
+    ProviderResponse,
+)
 from avior.core.result import RunResult
 from avior.core.runner import Runner
 from avior.core.tools import Tool, tool
@@ -36,6 +41,7 @@ __all__ = [
     "Agent",
     "AssistantMessage",
     "Message",
+    "ModelCapabilities",
     "ModelSettings",
     "Part",
     "Provider",
