@@ -364,9 +364,9 @@ async def test_runner_run_raises_on_max_tokens_stop_reason() -> None:
 async def test_runner_run_max_tokens_message_omits_none_when_unset() -> None:
     """The exception message stays human-readable when `max_tokens` is `None`.
 
-    When the user hasn't set `max_tokens` explicitly but the provider's default
-    cap was hit, the exception text must not say "budget (None)" - it should
-    describe the default-cap situation in actionable terms.
+    When the user hasn't set `max_tokens` explicitly but the provider's cap was
+    hit, the exception text must not say "budget (None)" - it should describe
+    hitting the model's maximum output in actionable terms.
     """
 
     # GIVEN an agent with no explicit `max_tokens` and a provider that returns
@@ -379,12 +379,12 @@ async def test_runner_run_max_tokens_message_omits_none_when_unset() -> None:
     runner = Runner(provider=StubProvider.from_responses([truncated]))
 
     # WHEN `Runner.run` is invoked
-    # THEN the exception is raised, the message points at `max_tokens` as the
-    # actionable knob, and it does not leak "None"
+    # THEN the exception is raised, its message describes the maximum-output
+    # situation in actionable terms, and it does not leak "None"
     with pytest.raises(MaxTokensExceededError) as exc_info:
         await runner.run(agent, "hello")
     message = str(exc_info.value)
-    assert "max_tokens" in message
+    assert "maximum output" in message
     assert "None" not in message
 
 

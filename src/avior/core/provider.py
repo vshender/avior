@@ -26,7 +26,14 @@ class ModelSettings(BaseModel):
     """Sampling temperature; `None` uses the provider's default."""
 
     max_tokens: int | None = None
-    """Maximum output tokens; `None` uses the provider's default."""
+    """Maximum output tokens.
+
+    `None` requests the largest output the provider allows, so the same setting
+    behaves consistently across providers: a provider whose API makes
+    the cap optional omits it, while one whose API requires a cap sends the
+    largest value its transport allows.  Set an explicit value to bound the
+    output lower.
+    """
 
     thinking: bool | Literal["low", "medium", "high"] | None = None
     """A portable control for reasoning / thinking; each provider maps it to

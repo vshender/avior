@@ -266,8 +266,13 @@ async def test_complete_forwards_explicit_max_tokens_and_temperature() -> None:
     assert call_kwargs["temperature"] == 0.2
 
 
-async def test_complete_defaults_max_tokens_to_4096_when_unset() -> None:
-    """`complete` falls back to 4096 when `settings.max_tokens` is `None`."""
+async def test_complete_defaults_max_tokens_to_nonstreaming_max_when_unset() -> None:
+    """`complete` falls back to the non-streaming output cap when `max_tokens`
+    is `None`.
+
+    Anthropic requires `max_tokens`, so an unset value defaults to the largest
+    output the Anthropic SDK serves without streaming.
+    """
 
     # GIVEN a mock client and settings without an explicit `max_tokens`
     mock_client = _mock_client_returning(_response("ok"))
@@ -277,8 +282,8 @@ async def test_complete_defaults_max_tokens_to_4096_when_unset() -> None:
     # WHEN `complete` is invoked
     await provider.complete([UserMessage.from_text("hi")], settings)
 
-    # THEN the Anthropic SDK call receives `max_tokens=4096`
-    assert mock_client.messages.create.call_args.kwargs["max_tokens"] == 4096
+    # THEN the Anthropic SDK call receives the non-streaming maximum (21333)
+    assert mock_client.messages.create.call_args.kwargs["max_tokens"] == 21333
 
 
 async def test_complete_omits_temperature_when_unset() -> None:

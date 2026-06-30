@@ -360,12 +360,12 @@ class Runner:
             case "max_tokens":
                 configured = settings.max_tokens
                 detail = (
-                    f"Model hit max_tokens budget ({configured}) before completing."
+                    f"Model hit max_tokens budget ({configured}) before "
+                    "completing.  Increase max_tokens or shorten the input."
                     if configured is not None
                     else (
-                        "Model hit the provider's default token cap before "
-                        "completing.  Set `ModelSettings.max_tokens` explicitly "
-                        "to raise the limit."
+                        "Model hit the provider's maximum output limit before "
+                        "completing.  Shorten the input or split the task."
                     )
                 )
                 raise MaxTokensExceededError(detail)

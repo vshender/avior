@@ -57,8 +57,26 @@ from avior.core.usage import Usage
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_MAX_TOKENS = 4096
-"""Fallback `max_tokens` when `ModelSettings.max_tokens` is `None`."""
+# The Anthropic SDK refuses a non-streaming request it estimates could run past
+# a 10-minute limit, assuming a rate of 128_000 output tokens per hour.  Scaling
+# that rate to the 10-minute limit gives the largest value it serves without
+# streaming: 128_000 * 10 // 60 = 21333.  These mirror literals inside the
+# Anthropic SDK's non-streaming guard, which does not expose them as reusable
+# constants; if that ceiling ever drops below this, the guard raises (surfaced
+# as `ProviderError`) rather than failing silently.
+_NONSTREAMING_LIMIT_MINUTES = 10
+_MINUTES_PER_HOUR = 60
+_TOKENS_PER_HOUR = 128_000
+
+_MAX_NONSTREAMING_TOKENS = (
+    _TOKENS_PER_HOUR * _NONSTREAMING_LIMIT_MINUTES // _MINUTES_PER_HOUR
+)
+"""`max_tokens` used when `ModelSettings.max_tokens` is `None`.
+
+Anthropic's Messages API requires `max_tokens`, so an unset value defaults to
+the largest output the Anthropic SDK serves without streaming.  This is below
+the model's true maximum for models that can emit more with streaming.
+"""
 
 
 class AnthropicProvider(Provider):
@@ -112,8 +130,9 @@ class AnthropicProvider(Provider):
     ) -> ProviderResponse:
         """Send the conversation to Claude and return the response.
 
-        `max_tokens` falls back to 4096 when `settings.max_tokens is None`;
-        `temperature` is forwarded only when explicitly set on `settings`.
+        `max_tokens` falls back to the model's maximum non-streaming output when
+        `settings.max_tokens is None`; `temperature` is forwarded only when
+        explicitly set on `settings`.
 
         Args:
             messages: Conversation transcript (user / assistant / tool turns).
@@ -169,7 +188,7 @@ class AnthropicProvider(Provider):
         max_tokens = (
             settings.max_tokens
             if settings.max_tokens is not None
-            else _DEFAULT_MAX_TOKENS
+            else _MAX_NONSTREAMING_TOKENS
         )
         tools_param: list[ToolParam] | Omit = (
             [self._to_tool_param(t) for t in tools] if tools else omit

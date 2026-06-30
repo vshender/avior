@@ -366,9 +366,8 @@ async def test_complete_forwards_explicit_max_tokens_and_temperature() -> None:
 async def test_complete_omits_max_output_tokens_when_unset() -> None:
     """`complete` passes `omit` for `max_output_tokens` when not set.
 
-    Unlike the Anthropic adapter (which defaults `max_tokens` to 4096), the
-    Responses API does not require `max_output_tokens`, so the OpenAI adapter
-    forwards no default - the SDK applies its own.
+    The Responses API does not require `max_output_tokens`, so an unset
+    `max_tokens` forwards no default and the model uses its own maximum output.
     """
 
     # GIVEN a mock client and settings without an explicit `max_tokens`
