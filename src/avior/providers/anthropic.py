@@ -16,8 +16,12 @@ try:
     from anthropic.types import Message as AnthropicMessage
     from anthropic.types import (
         MessageParam,
+        RedactedThinkingBlock,
+        RedactedThinkingBlockParam,
         TextBlock,
         TextBlockParam,
+        ThinkingBlock,
+        ThinkingBlockParam,
         ToolParam,
         ToolResultBlockParam,
         ToolUseBlock,
@@ -148,7 +152,11 @@ class AnthropicProvider(Provider):
 
         logger.debug("complete: model=%s, messages=%d", settings.model, len(messages))
 
-        wire_messages = [self._to_wire(m) for m in messages]
+        wire_messages = [
+            wire_message
+            for m in messages
+            if (wire_message := self._to_wire(m)) is not None
+        ]
 
         system_param: list[TextBlockParam] | Omit = (
             [TextBlockParam(type="text", text=system_prompt)]
@@ -205,6 +213,7 @@ class AnthropicProvider(Provider):
         for block in response.content:
             if isinstance(block, TextBlock):
                 parts.append(TextPart(text=block.text))
+
             elif isinstance(block, ToolUseBlock):
                 parts.append(
                     ToolCallPart(
@@ -213,11 +222,33 @@ class AnthropicProvider(Provider):
                         args=cast(dict[str, Any], block.input),
                     )
                 )
+
+            elif isinstance(block, ThinkingBlock):
+                # The `signature` is kept in `provider_details` so it can be
+                # echoed back unchanged on a later turn (Anthropic checks it on
+                # replay).
+                parts.append(
+                    ThinkingPart(
+                        content=block.thinking,
+                        provider_details={"signature": block.signature},
+                    )
+                )
+
+            elif isinstance(block, RedactedThinkingBlock):
+                # Encrypted reasoning with no readable text; keep the opaque
+                # blob to echo back, with empty `content`.
+                parts.append(
+                    ThinkingPart(
+                        content="",
+                        provider_details={"redacted_data": block.data},
+                    )
+                )
+
             else:
-                # A block avior cannot represent yet (thinking, server tool
-                # use / results, container uploads, ...).  avior does not enable
-                # the features that produce these, so failing loud beats
-                # silently dropping content and returning a misleading success.
+                # A block avior cannot represent yet (server tool use / results,
+                # container uploads, ...).  avior does not enable the features
+                # that produce these, so failing loud beats silently dropping
+                # content and returning a misleading success.
                 raise ProviderResponseValidationError(
                     "Anthropic returned an unsupported content block: "
                     f"{type(block).__name__}."
@@ -335,17 +366,22 @@ class AnthropicProvider(Provider):
             input_schema=tool.args_model.model_json_schema(),
         )
 
-    @staticmethod
-    def _to_wire(message: Message) -> MessageParam:
-        """Convert an avior `Message` to an Anthropic `MessageParam`.
+    def _to_wire(self, message: Message) -> MessageParam | None:
+        """Convert an avior `Message` to an Anthropic `MessageParam`, or `None`.
 
         Maps each message type to Anthropic's wire shape:
 
         - `UserMessage` -> a `user` turn of text blocks.
         - `AssistantMessage` -> an `assistant` turn; text parts become text
-          blocks and tool calls become `tool_use` blocks.
+          blocks and tool calls become `tool_use` blocks.  A reasoning step is
+          echoed back unchanged as a `thinking` / `redacted_thinking` block when
+          this provider produced the turn, and dropped otherwise.
         - `ToolMessage` -> a `user` turn of `tool_result` blocks (Anthropic
           carries tool results in the user role).
+
+        Returns `None` for an assistant turn whose parts all drop out (only
+        reasoning steps, none of them echoable): it would serialize to an empty
+        turn, which Anthropic rejects, so it is omitted from the request.
         """
 
         match message:
@@ -356,7 +392,12 @@ class AnthropicProvider(Provider):
                 return MessageParam(role="user", content=user_content)
 
             case AssistantMessage():
-                asst_content: list[TextBlockParam | ToolUseBlockParam] = []
+                asst_content: list[
+                    TextBlockParam
+                    | ToolUseBlockParam
+                    | ThinkingBlockParam
+                    | RedactedThinkingBlockParam
+                ] = []
                 for part in message.parts:
                     match part:
                         case TextPart():
@@ -376,13 +417,17 @@ class AnthropicProvider(Provider):
                                 )
                             )
                         case ThinkingPart():
-                            # Reasoning blocks are not decoded or echoed, so
-                            # skip them.  This is also correct for a block from
-                            # a different provider, whose opaque token must
-                            # never be sent to Anthropic.
-                            continue
+                            block = self._to_thinking_block_param(message, part)
+                            if block is not None:
+                                asst_content.append(block)
                         case _:
                             assert_never(part)
+
+                # A turn left empty after dropping non-echoable reasoning steps
+                # carries nothing to send; omit it, since Anthropic rejects an
+                # empty turn.
+                if not asst_content:
+                    return None
 
                 return MessageParam(role="assistant", content=asst_content)
 
@@ -400,3 +445,34 @@ class AnthropicProvider(Provider):
 
             case _:
                 assert_never(message)
+
+    def _to_thinking_block_param(
+        self,
+        message: AssistantMessage,
+        part: ThinkingPart,
+    ) -> ThinkingBlockParam | RedactedThinkingBlockParam | None:
+        """Build the wire block to echo a reasoning step, or `None` to drop it.
+
+        A reasoning block round-trips only to the provider that produced it: the
+        opaque token is provider-specific, and Anthropic rejects a foreign or
+        modified block.  Returns `None` - dropping the part - when the turn came
+        from a different provider, or carries no token to echo.
+        """
+
+        if message.provider_name != self.name:
+            return None
+
+        details = part.provider_details or {}
+        if "redacted_data" in details:
+            return RedactedThinkingBlockParam(
+                type="redacted_thinking",
+                data=cast(str, details["redacted_data"]),
+            )
+        elif "signature" in details:
+            return ThinkingBlockParam(
+                type="thinking",
+                thinking=part.content,
+                signature=cast(str, details["signature"]),
+            )
+        else:
+            return None

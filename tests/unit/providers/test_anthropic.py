@@ -15,7 +15,14 @@ from anthropic import (
     omit,
 )
 from anthropic.types import Message as AnthropicMessage
-from anthropic.types import TextBlock, ThinkingBlock, ToolUseBlock, Usage
+from anthropic.types import (
+    RedactedThinkingBlock,
+    ServerToolUseBlock,
+    TextBlock,
+    ThinkingBlock,
+    ToolUseBlock,
+    Usage,
+)
 from pydantic import BaseModel
 
 from avior.core.context import RunContext
@@ -30,6 +37,7 @@ from avior.core.messages import (
     Message,
     StopReason,
     TextPart,
+    ThinkingPart,
     ToolCallPart,
     ToolMessage,
     ToolResultError,
@@ -319,18 +327,23 @@ async def test_complete_returns_empty_parts_when_response_content_is_empty() -> 
 async def test_complete_raises_on_unsupported_content_block() -> None:
     """A content block avior cannot represent raises rather than dropping.
 
-    The adapter maps only `TextBlock` / `ToolUseBlock`; any other block (here a
-    `ThinkingBlock`) carries content the canonical IR has no slot for, so it
-    fails loud instead of being silently dropped into a misleading success.
+    The adapter maps text, tool-use, and thinking blocks; any other block (here
+    a `server_tool_use` block) carries content the canonical IR has no slot for,
+    so it fails loud instead of being silently dropped into a misleading
+    success.
     """
 
-    # GIVEN a response carrying a thinking block the adapter does not map
+    # GIVEN a response carrying a server-tool-use block the adapter does not map
     response = AnthropicMessage(
         id="msg_test",
         type="message",
         role="assistant",
         model="claude-test",
-        content=[ThinkingBlock(type="thinking", thinking="hmm", signature="sig")],
+        content=[
+            ServerToolUseBlock(
+                type="server_tool_use", id="srv_1", name="web_search", input={}
+            )
+        ],
         stop_reason="end_turn",
         stop_sequence=None,
         usage=Usage(input_tokens=0, output_tokens=0),
@@ -796,6 +809,245 @@ async def test_complete_sends_tool_message_as_user_tool_result_blocks() -> None:
             },
         ],
     }
+
+
+# Thinking round-trip tests
+# -----------------------------------------------------------------------------
+
+
+async def test_complete_decodes_thinking_block_into_thinking_part() -> None:
+    """A response `ThinkingBlock` decodes into a `ThinkingPart`.
+
+    The `signature` is kept in `provider_details` so it can be echoed back
+    verbatim on a later turn.
+    """
+
+    # GIVEN a response carrying a thinking block with text and a signature
+    response = AnthropicMessage(
+        id="msg_test",
+        type="message",
+        role="assistant",
+        model="claude-test",
+        content=[
+            ThinkingBlock(type="thinking", thinking="let me think", signature="sig-1")
+        ],
+        stop_reason="end_turn",
+        stop_sequence=None,
+        usage=Usage(input_tokens=0, output_tokens=0),
+    )
+    provider = _provider(_mock_client_returning(response))
+
+    # WHEN `complete` is awaited
+    result = await provider.complete([UserMessage.from_text("hi")], _settings())
+
+    # THEN the block decodes into a `ThinkingPart` carrying the text and the
+    # signature
+    assert result.message.parts == [
+        ThinkingPart(content="let me think", provider_details={"signature": "sig-1"})
+    ]
+
+
+async def test_complete_decodes_redacted_thinking_block_into_thinking_part() -> None:
+    """A `RedactedThinkingBlock` decodes into a text-less `ThinkingPart`.
+
+    Redacted reasoning has no readable text; the encrypted blob is kept in
+    `provider_details` to echo back, with empty `content`.
+    """
+
+    # GIVEN a response carrying a redacted thinking block
+    response = AnthropicMessage(
+        id="msg_test",
+        type="message",
+        role="assistant",
+        model="claude-test",
+        content=[RedactedThinkingBlock(type="redacted_thinking", data="enc-blob")],
+        stop_reason="end_turn",
+        stop_sequence=None,
+        usage=Usage(input_tokens=0, output_tokens=0),
+    )
+    provider = _provider(_mock_client_returning(response))
+
+    # WHEN `complete` is awaited
+    result = await provider.complete([UserMessage.from_text("hi")], _settings())
+
+    # THEN it decodes into a text-less `ThinkingPart` carrying the blob
+    assert result.message.parts == [
+        ThinkingPart(content="", provider_details={"redacted_data": "enc-blob"})
+    ]
+
+
+async def test_complete_tags_assistant_message_with_its_provider_name() -> None:
+    """`complete` records the producing provider on the assistant message.
+
+    Echo gating reads `AssistantMessage.provider_name` to decide whether to send
+    a reasoning block's opaque token back, so the turn must carry it.
+    """
+
+    # GIVEN a mock client returning a plain text response
+    response = _response("Hi!")
+    provider = _provider(_mock_client_returning(response))
+
+    # WHEN `complete` is awaited
+    result = await provider.complete([UserMessage.from_text("hi")], _settings())
+
+    # THEN the assistant message is tagged with this provider's name
+    assert result.message.provider_name == "anthropic"
+
+
+async def test_complete_echoes_own_thinking_block_verbatim() -> None:
+    """An own-provider `ThinkingPart` is echoed back as a `thinking` block."""
+
+    # GIVEN a continuation transcript whose assistant turn (produced by this
+    # provider) carries a thinking block followed by text
+    mock_client = _mock_client_returning(_response("ok"))
+    provider = _provider(mock_client)
+    history: list[Message] = [
+        UserMessage.from_text("hi"),
+        AssistantMessage(
+            parts=[
+                ThinkingPart(content="hmm", provider_details={"signature": "sig"}),
+                TextPart(text="answer"),
+            ],
+            stop_reason="stop",
+            provider_name="anthropic",
+        ),
+        UserMessage.from_text("again"),
+    ]
+
+    # WHEN `complete` is invoked
+    await provider.complete(history, _settings())
+
+    # THEN the assistant turn is sent with the thinking block first, unchanged
+    wire_messages = mock_client.messages.create.call_args.kwargs["messages"]
+    assistant_wire = next(m for m in wire_messages if m["role"] == "assistant")
+    assert assistant_wire["content"] == [
+        {"type": "thinking", "thinking": "hmm", "signature": "sig"},
+        {"type": "text", "text": "answer"},
+    ]
+
+
+async def test_complete_echoes_own_redacted_thinking_block_verbatim() -> None:
+    """An own-provider redacted `ThinkingPart` echoes as a `redacted_thinking`
+    block.
+    """
+
+    # GIVEN a continuation transcript whose assistant turn carries a redacted
+    # thinking block
+    mock_client = _mock_client_returning(_response("ok"))
+    provider = _provider(mock_client)
+    history: list[Message] = [
+        UserMessage.from_text("hi"),
+        AssistantMessage(
+            parts=[ThinkingPart(content="", provider_details={"redacted_data": "enc"})],
+            stop_reason="stop",
+            provider_name="anthropic",
+        ),
+        UserMessage.from_text("again"),
+    ]
+
+    # WHEN `complete` is invoked
+    await provider.complete(history, _settings())
+
+    # THEN the redacted block is echoed back unchanged
+    wire_messages = mock_client.messages.create.call_args.kwargs["messages"]
+    assistant_wire = next(m for m in wire_messages if m["role"] == "assistant")
+    assert assistant_wire["content"] == [{"type": "redacted_thinking", "data": "enc"}]
+
+
+async def test_complete_drops_thinking_block_from_a_different_provider() -> None:
+    """A `ThinkingPart` from another provider is dropped, not echoed.
+
+    The opaque token is provider-specific; sending a foreign one to Anthropic
+    would be rejected, so the gate keys on the turn's `provider_name`.
+    """
+
+    # GIVEN a continuation transcript whose assistant turn was produced by a
+    # different provider but still carries a thinking block and text
+    mock_client = _mock_client_returning(_response("ok"))
+    provider = _provider(mock_client)
+    history: list[Message] = [
+        UserMessage.from_text("hi"),
+        AssistantMessage(
+            parts=[
+                ThinkingPart(content="hmm", provider_details={"signature": "sig"}),
+                TextPart(text="answer"),
+            ],
+            stop_reason="stop",
+            provider_name="openai",
+        ),
+        UserMessage.from_text("again"),
+    ]
+
+    # WHEN `complete` is invoked
+    await provider.complete(history, _settings())
+
+    # THEN only the portable text survives; the foreign thinking block is
+    # dropped
+    wire_messages = mock_client.messages.create.call_args.kwargs["messages"]
+    assistant_wire = next(m for m in wire_messages if m["role"] == "assistant")
+    assert assistant_wire["content"] == [{"type": "text", "text": "answer"}]
+
+
+async def test_complete_drops_own_thinking_part_without_a_token() -> None:
+    """An own-provider `ThinkingPart` with no token to echo is dropped.
+
+    A reasoning step that carries no `provider_details` token has nothing
+    Anthropic can validate on replay, so it is dropped even though this provider
+    produced the turn.
+    """
+
+    # GIVEN a continuation transcript whose own assistant turn carries a
+    # token-less thinking part alongside text
+    mock_client = _mock_client_returning(_response("ok"))
+    provider = _provider(mock_client)
+    history: list[Message] = [
+        UserMessage.from_text("hi"),
+        AssistantMessage(
+            parts=[ThinkingPart(content="hmm"), TextPart(text="answer")],
+            stop_reason="stop",
+            provider_name="anthropic",
+        ),
+        UserMessage.from_text("again"),
+    ]
+
+    # WHEN `complete` is invoked
+    await provider.complete(history, _settings())
+
+    # THEN the token-less thinking part is dropped and only the text survives
+    wire_messages = mock_client.messages.create.call_args.kwargs["messages"]
+    assistant_wire = next(m for m in wire_messages if m["role"] == "assistant")
+    assert assistant_wire["content"] == [{"type": "text", "text": "answer"}]
+
+
+async def test_complete_omits_assistant_turn_that_filters_to_no_content() -> None:
+    """An assistant turn left empty after dropping reasoning steps is omitted.
+
+    A foreign-provider thinking-only turn drops its single part, leaving no wire
+    content; Anthropic rejects an empty turn, so the whole turn is omitted from
+    the request rather than sent empty.
+    """
+
+    # GIVEN a continuation transcript whose only non-user turn is a foreign
+    # thinking-only assistant turn
+    mock_client = _mock_client_returning(_response("ok"))
+    provider = _provider(mock_client)
+    history: list[Message] = [
+        UserMessage.from_text("hi"),
+        AssistantMessage(
+            parts=[ThinkingPart(content="hmm", provider_details={"signature": "sig"})],
+            stop_reason="stop",
+            provider_name="openai",
+        ),
+        UserMessage.from_text("again"),
+    ]
+
+    # WHEN `complete` is invoked
+    await provider.complete(history, _settings())
+
+    # THEN the emptied assistant turn is omitted, leaving the two user turns
+    wire_messages = mock_client.messages.create.call_args.kwargs["messages"]
+    assert all(m["role"] != "assistant" for m in wire_messages)
+    assert len(wire_messages) == 2
 
 
 # Lifecycle tests

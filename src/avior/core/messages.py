@@ -167,8 +167,9 @@ class ThinkingPart(BaseModel):
     provider_details: dict[str, JsonValue] | None = None
     """Opaque provider data the model expects to receive back unchanged on a
     later turn.  Carries the provider's round-trip token for the reasoning
-    step - for example an Anthropic `signature`, an OpenAI reasoning item's `id`
-    and `encrypted_content`, or a Gemini `thought_signature`.
+    step - for example an Anthropic thinking block's `signature` or a redacted
+    block's `data`, an OpenAI reasoning item's `encrypted_content`, or a Gemini
+    `thought_signature`.
 
     A provider sets it on the blocks it produces; the turn's `provider_name`
     records the owner, so the data is sent back only to that same provider.  A
