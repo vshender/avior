@@ -6,8 +6,16 @@ from dataclasses import dataclass
 from types import TracebackType
 from typing import Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    TypeAdapter,
+    ValidationError,
+)
 
+from avior.core.exceptions import AviorUsageError
 from avior.core.messages import AssistantMessage, Message
 from avior.core.tools import Tool
 from avior.core.usage import Usage
@@ -68,6 +76,38 @@ class ModelSettings(BaseModel):
     Despite `ModelSettings` being frozen, the nested dicts are not - do not
     mutate them after construction.
     """
+
+
+def resolve_provider_options[Options](
+    settings: ModelSettings,
+    name: str,
+    adapter: TypeAdapter[Options],
+) -> Options:
+    """Validate and return a provider's `provider_options` slice.
+
+    Args:
+        settings: The settings whose `provider_options` is read.
+        name: The provider's own name, the key of its slice in
+            `provider_options`.  Only that slice is read, so slices keyed for
+            other providers are left untouched.  A missing slice validates as
+            empty.
+        adapter: A `TypeAdapter` over the provider's options `TypedDict` (for
+            example `AnthropicProviderOptions`), used to validate the slice.
+
+    Returns:
+        The validated slice, typed as the `TypedDict` the `adapter` describes.
+
+    Raises:
+        AviorUsageError: The `adapter` rejects the slice - it contains a key the
+            options `TypedDict` does not define, or a value of the wrong type or
+            outside the allowed set.  The underlying `pydantic.ValidationError`
+            is preserved as the cause.
+    """
+
+    try:
+        return adapter.validate_python(settings.provider_options.get(name, {}))
+    except ValidationError as e:
+        raise AviorUsageError(f"Invalid `provider_options[{name!r}]`: {e}") from e
 
 
 class ProviderResponse(BaseModel):

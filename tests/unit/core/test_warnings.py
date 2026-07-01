@@ -21,3 +21,22 @@ def test_unsupported_setting_warning_message_truncates_a_long_value() -> None:
     # THEN the long value is shortened with an ellipsis marker
     assert "..." in message
     assert long_value not in message
+
+
+def test_unsupported_setting_warning_message_includes_the_reason() -> None:
+    """`message` includes `reason` when one is given."""
+
+    # GIVEN a warning carrying a reason
+    warning = UnsupportedSettingRunWarning(
+        setting_name="thinking",
+        setting_value="high",
+        provider="anthropic",
+        model="claude-x",
+        reason="the thinking budget does not fit max_tokens",
+    )
+
+    # WHEN the message is read
+    message = warning.message
+
+    # THEN the reason appears in it
+    assert "the thinking budget does not fit max_tokens" in message

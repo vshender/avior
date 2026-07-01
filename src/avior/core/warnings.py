@@ -33,6 +33,12 @@ class UnsupportedSettingRunWarning(BaseModel):
     setting_value: JsonValue
     """The requested value that was not honored, for example `"high"`."""
 
+    reason: str | None = None
+    """The reason the setting could not be honored, beyond the generic message -
+    for example that a thinking budget did not fit the requested `max_tokens`.
+    `None` when there is no detail to add.
+    """
+
     provider: str
     """Name of the provider whose model could not honor the setting."""
 
@@ -47,9 +53,11 @@ class UnsupportedSettingRunWarning(BaseModel):
         value = repr(self.setting_value)
         if len(value) > _MAX_VALUE_REPR_LEN:
             value = value[:_MAX_VALUE_REPR_LEN] + "..."
+        detail = f": {self.reason}" if self.reason is not None else ""
         return (
             f"Model {self.model!r} ({self.provider}) could not honor the "
-            f"{self.setting_name!r} setting (requested {value}); it was ignored."
+            f"{self.setting_name!r} setting (requested {value}){detail}; "
+            f"it was dropped from the request."
         )
 
 

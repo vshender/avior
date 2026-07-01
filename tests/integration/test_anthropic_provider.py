@@ -13,7 +13,12 @@ from pydantic import BaseModel
 from avior.core import Agent, ModelSettings, Runner
 from avior.core.context import RunContext
 from avior.core.exceptions import MaxTokensExceededError
-from avior.core.messages import AssistantMessage, ToolCallPart
+from avior.core.messages import (
+    AssistantMessage,
+    ThinkingPart,
+    ToolCallPart,
+    UserMessage,
+)
 from avior.core.tools import Tool
 from avior.providers.anthropic import AnthropicProvider
 
@@ -23,6 +28,10 @@ pytestmark = pytest.mark.skipif(
 )
 
 _MODEL = "claude-haiku-4-5-20251001"
+
+# A model whose thinking runs through Anthropic's adaptive config, unlike the
+# budget-mode `_MODEL`.
+_ADAPTIVE_MODEL = "claude-sonnet-4-6"
 
 
 class _MagicNumberArgs(BaseModel):
@@ -136,3 +145,109 @@ async def test_runner_run_against_anthropic_calls_a_tool_end_to_end(
 
     # AND the final answer relays the tool's result
     assert "4242" in result.output
+
+
+async def test_complete_returns_thinking_against_anthropic(
+    anthropic_provider: AnthropicProvider,
+) -> None:
+    """`complete` decodes a real thinking block with summarized text.
+
+    Sends a raw `thinking` config (enabled, `display="summarized"`) and a
+    reasoning prompt, then checks the assistant turn carries a `ThinkingPart`
+    whose text is the model's summarized reasoning.
+    """
+
+    # GIVEN settings that request budget thinking with a readable summary
+    settings = ModelSettings(
+        model=_MODEL,
+        provider_options={
+            "anthropic": {
+                "thinking": {
+                    "type": "enabled",
+                    "budget_tokens": 2000,
+                    "display": "summarized",
+                }
+            }
+        },
+    )
+
+    # WHEN `complete` is awaited on a prompt that needs reasoning
+    result = await anthropic_provider.complete(
+        [UserMessage.from_text("What is 17 * 23?  Reason step by step.")],
+        settings,
+    )
+
+    # THEN the assistant turn carries a thinking block with summarized text
+    thinking_parts = [p for p in result.message.parts if isinstance(p, ThinkingPart)]
+    assert thinking_parts
+    assert any(p.content.strip() for p in thinking_parts)
+
+
+async def test_complete_returns_adaptive_thinking_against_anthropic(
+    anthropic_provider: AnthropicProvider,
+) -> None:
+    """The portable `thinking` level drives adaptive thinking on a modern model.
+
+    A modern model reasons through Anthropic's adaptive config
+    (`{"type": "adaptive"}` plus `output_config.effort`).  Asserts the assistant
+    turn carries a `ThinkingPart`, proving the portable level maps to the
+    adaptive wire form and Anthropic accepts it.  The block's text is omitted by
+    default, so only its presence is checked, not its content.
+    """
+
+    # GIVEN settings that request thinking through the portable level
+    settings = ModelSettings(model=_ADAPTIVE_MODEL, thinking="high")
+
+    # WHEN `complete` is awaited on a prompt that needs reasoning
+    result = await anthropic_provider.complete(
+        [UserMessage.from_text("What is 17 * 23?  Reason step by step.")],
+        settings,
+    )
+
+    # THEN the assistant turn carries a thinking block
+    thinking_parts = [p for p in result.message.parts if isinstance(p, ThinkingPart)]
+    assert thinking_parts
+
+
+async def test_runner_run_thinking_tool_chain_against_anthropic(
+    anthropic_provider: AnthropicProvider,
+) -> None:
+    """A thinking-enabled tool round-trip completes against real Anthropic.
+
+    With `thinking` on, the assistant turn carries thinking blocks alongside the
+    tool call; the continuation must echo them back unchanged or Anthropic
+    rejects the turn.  A completed run relaying the tool's result proves the
+    multi-step thinking round-trip holds.
+    """
+
+    # GIVEN a thinking-enabled agent offered a tool whose result it cannot know
+    tool = _MagicNumber()
+    agent = Agent(
+        instructions=(
+            "When asked for a city's magic number, you must call the "
+            "get_magic_number tool, then state the number it returns."
+        ),
+        model_settings=ModelSettings(model=_MODEL, thinking="low"),
+        tools=[tool],
+    )
+
+    # WHEN we run a prompt that requires the tool
+    result = await Runner(provider=anthropic_provider).run(
+        agent, "What is the magic number for Paris?"
+    )
+
+    # THEN the tool ran and the final answer relays its result, so the thinking
+    # blocks round-tripped through the tool loop
+    assert tool.calls == ["Paris"]
+    assert "4242" in result.output
+
+    # AND the assistant turn carried thinking blocks (else the round-trip was
+    # never exercised)
+    thinking_parts = [
+        part
+        for message in result.messages
+        if isinstance(message, AssistantMessage)
+        for part in message.parts
+        if isinstance(part, ThinkingPart)
+    ]
+    assert thinking_parts
