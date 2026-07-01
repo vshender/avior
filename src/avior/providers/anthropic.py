@@ -8,7 +8,9 @@ Install via the optional extra: `pip install avior[anthropic]`.
 
 import logging
 from collections.abc import Sequence
-from typing import Any, assert_never, cast
+from typing import Any, Literal, TypedDict, assert_never, cast
+
+from pydantic import ConfigDict, TypeAdapter
 
 try:
     import anthropic
@@ -16,12 +18,17 @@ try:
     from anthropic.types import Message as AnthropicMessage
     from anthropic.types import (
         MessageParam,
+        OutputConfigParam,
         RedactedThinkingBlock,
         RedactedThinkingBlockParam,
         TextBlock,
         TextBlockParam,
         ThinkingBlock,
         ThinkingBlockParam,
+        ThinkingConfigAdaptiveParam,
+        ThinkingConfigDisabledParam,
+        ThinkingConfigEnabledParam,
+        ThinkingConfigParam,
         ToolParam,
         ToolResultBlockParam,
         ToolUseBlock,
@@ -51,11 +58,19 @@ from avior.core.messages import (
     ToolMessage,
     UserMessage,
 )
-from avior.core.provider import ModelSettings, Provider, ProviderResponse
+from avior.core.provider import (
+    ModelCapabilities,
+    ModelSettings,
+    Provider,
+    ProviderResponse,
+    resolve_provider_options,
+)
 from avior.core.tools import Tool
 from avior.core.usage import Usage
+from avior.core.warnings import RunWarning, UnsupportedSettingRunWarning
 
 logger = logging.getLogger(__name__)
+
 
 # The Anthropic SDK refuses a non-streaming request it estimates could run past
 # a 10-minute limit, assuming a rate of 128_000 output tokens per hour.  Scaling
@@ -77,6 +92,104 @@ Anthropic's Messages API requires `max_tokens`, so an unset value defaults to
 the largest output the Anthropic SDK serves without streaming.  This is below
 the model's true maximum for models that can emit more with streaming.
 """
+
+
+type _ThinkingMode = Literal["adaptive", "always_on", "budget"]
+"""How a model accepts a thinking request.
+
+- `"adaptive"` - `thinking={"type": "adaptive"}`, with depth set through
+  `output_config.effort`; turn it off with `{"type": "disabled"}`.
+- `"always_on"` - adaptive thinking that cannot be turned off (an explicit
+  `{"type": "disabled"}` is rejected), so a request to disable it is dropped and
+  the model keeps reasoning.
+- `"budget"` - legacy `thinking={"type": "enabled", "budget_tokens": N}`; the
+  model accepts neither adaptive thinking nor `output_config.effort`.
+"""
+
+_THINKING_MODES: dict[str, _ThinkingMode] = {
+    "claude-haiku-4-5": "budget",
+    "claude-sonnet-4-5": "budget",
+    "claude-sonnet-4-6": "adaptive",
+    "claude-opus-4-5": "budget",
+    "claude-opus-4-6": "adaptive",
+    "claude-opus-4-7": "adaptive",
+    "claude-opus-4-8": "adaptive",
+    "claude-fable-5": "always_on",
+    "claude-mythos-5": "always_on",
+}
+"""Thinking mode per model, keyed by model-id prefix so a dated snapshot (such
+as `claude-haiku-4-5-20251001`) resolves to the same mode as its alias.  The
+prefixes are disjoint, so match order does not matter.  A model matching none of
+them does not support thinking.
+"""
+
+
+def _thinking_mode(model: str) -> _ThinkingMode | None:
+    """Return how `model` accepts thinking, or `None` if it does not support it.
+
+    Matches by model-id prefix, so a dated snapshot resolves to its family's
+    mode.
+    """
+
+    for prefix, mode in _THINKING_MODES.items():
+        # Require the prefix to end at an identifier boundary, so an alias like
+        # `claude-opus-4-8` matches its dated snapshot `claude-opus-4-8-...` but
+        # not a different model such as a future `claude-opus-4-80`.
+        if model == prefix or model.startswith(prefix + "-"):
+            return mode
+
+    return None
+
+
+_THINKING_BUDGET_TOKENS: dict[Literal[True, "low", "medium", "high"], int] = {
+    True: 10000,
+    "low": 2048,
+    "medium": 10000,
+    "high": 16384,
+}
+"""`budget_tokens` for each portable thinking level on a budget-mode model.
+
+The value must stay under the request's `max_tokens`; an unset `max_tokens`
+defaults high enough (see `_MAX_NONSTREAMING_TOKENS`) that every level fits.
+"""
+
+type _ThinkingEffort = Literal["low", "medium", "high", "xhigh", "max"]
+"""`output_config.effort` levels Anthropic accepts."""
+
+
+class AnthropicProviderOptions(TypedDict, total=False):
+    """Anthropic-specific `provider_options["anthropic"]` settings.
+
+    Raw Anthropic thinking settings, for control that the portable
+    `ModelSettings.thinking` setting does not reach.  Each takes precedence
+    over that portable setting.  Unknown keys are rejected when the slice is
+    validated.
+    """
+
+    # Forbid unknown keys when validating the slice.  The type-checker ignores
+    # are needed because a `TypedDict` body normally holds only field
+    # annotations, not this assignment.
+    __pydantic_config__ = ConfigDict(  # type: ignore[misc]  # pyright: ignore
+        extra="forbid"
+    )
+
+    thinking: ThinkingConfigParam
+    """A raw Anthropic thinking config, sent as-is in place of the portable
+    setting.  It bypasses the portable mapping, so it still drives thinking
+    on a model avior does not yet classify.  avior validates its shape against
+    the installed Anthropic SDK types before sending, so it must match that
+    version's config, not a newer one.
+    """
+
+    effort: _ThinkingEffort
+    """A raw `output_config.effort`.  It takes precedence over any effort the
+    portable mapping would set, and reaches `xhigh` / `max`, which the portable
+    levels (`low` / `medium` / `high`) do not cover.
+    """
+
+
+_ANTHROPIC_OPTIONS_ADAPTER = TypeAdapter(AnthropicProviderOptions)
+"""`TypeAdapter` for the `provider_options["anthropic"]` slice."""
 
 
 class AnthropicProvider(Provider):
@@ -120,6 +233,18 @@ class AnthropicProvider(Provider):
 
         return "anthropic"
 
+    def model_capabilities(self, model: str) -> ModelCapabilities:
+        """Report what `model` supports.
+
+        Reports `supports_thinking=True` for any model with a known thinking
+        mode - adaptive, always-on, or legacy budget - and the conservative
+        default otherwise.
+        """
+
+        return ModelCapabilities(
+            supports_thinking=_thinking_mode(model) is not None,
+        )
+
     async def complete(
         self,
         messages: Sequence[Message],
@@ -130,9 +255,20 @@ class AnthropicProvider(Provider):
     ) -> ProviderResponse:
         """Send the conversation to Claude and return the response.
 
-        `max_tokens` falls back to the model's maximum non-streaming output when
-        `settings.max_tokens is None`; `temperature` is forwarded only when
-        explicitly set on `settings`.
+        The portable `settings` map to Anthropic's request as follows:
+
+        - `max_tokens` - falls back to the model's maximum non-streaming
+          output when `settings.max_tokens is None`.
+        - `temperature` - forwarded only when explicitly set on `settings`.
+        - `thinking` - the portable level maps to the chosen model's native
+          config: an adaptive model to `{"type": "adaptive"}` with an
+          `output_config.effort`, a budget model to `{"type": "enabled",
+          "budget_tokens": N}`.  A request the model cannot honor is dropped,
+          with an `UnsupportedSettingRunWarning` on the response: the model
+          does not support thinking, its thinking is always on and cannot be
+          disabled, or a budget does not fit an explicit `max_tokens`.
+          `provider_options["anthropic"]` overrides this mapping; see
+          `AnthropicProviderOptions`.
 
         Args:
             messages: Conversation transcript (user / assistant / tool turns).
@@ -193,6 +329,8 @@ class AnthropicProvider(Provider):
         tools_param: list[ToolParam] | Omit = (
             [self._to_tool_param(t) for t in tools] if tools else omit
         )
+        warnings: list[RunWarning] = []
+        thinking_param, output_config_param = self._resolve_thinking(settings, warnings)
 
         try:
             response = await self._client.messages.create(
@@ -202,6 +340,8 @@ class AnthropicProvider(Provider):
                 max_tokens=max_tokens,
                 temperature=temperature_param,
                 tools=tools_param,
+                thinking=thinking_param,
+                output_config=output_config_param,
             )
         except anthropic.APIStatusError as e:
             raise ProviderHTTPError(str(e), status_code=e.status_code) from e
@@ -296,6 +436,7 @@ class AnthropicProvider(Provider):
             response_id=response.id,
             model=response.model,
             provider_name=self.name,
+            warnings=warnings,
         )
 
     async def aclose(self) -> None:
@@ -374,6 +515,124 @@ class AnthropicProvider(Provider):
                 )
             case _:
                 assert_never(response.stop_reason)
+
+    def _resolve_thinking(
+        self,
+        settings: ModelSettings,
+        warnings: list[RunWarning],
+    ) -> tuple[ThinkingConfigParam | Omit, OutputConfigParam | Omit]:
+        """Map the thinking settings to Anthropic's native config.
+
+        Returns the `thinking` and `output_config` request parameters, using
+        `omit` for each that should not be sent.
+
+        The raw `anthropic` provider options take precedence over the portable
+        `thinking` setting; `AnthropicProviderOptions` documents how they
+        combine.  Without them, the portable level maps to the model's native
+        shape - see `_portable_thinking`.
+        """
+
+        options = resolve_provider_options(
+            settings,
+            self.name,
+            _ANTHROPIC_OPTIONS_ADAPTER,
+        )
+        raw_thinking = options.get("thinking")
+        raw_effort = options.get("effort")
+
+        thinking_param: ThinkingConfigParam | Omit
+        effort: _ThinkingEffort | None
+        if raw_thinking is not None:
+            thinking_param, effort = raw_thinking, raw_effort
+        else:
+            thinking_param, effort = self._portable_thinking(settings, warnings)
+            if raw_effort is not None:
+                effort = raw_effort
+
+        output_config_param: OutputConfigParam | Omit = (
+            OutputConfigParam(effort=effort) if effort is not None else omit
+        )
+
+        return thinking_param, output_config_param
+
+    def _portable_thinking(
+        self,
+        settings: ModelSettings,
+        warnings: list[RunWarning],
+    ) -> tuple[ThinkingConfigParam | Omit, _ThinkingEffort | None]:
+        """Map the portable `thinking` level to a native config for `settings`.
+
+        Returns the `thinking` parameter (or `omit`) and the effort level (or
+        `None`), appending an `UnsupportedSettingRunWarning` when a request is
+        dropped.  `complete` documents the mapping and the drop conditions.
+        """
+
+        thinking = settings.thinking
+        if thinking is None:
+            return omit, None
+
+        mode = _thinking_mode(settings.model)
+        if mode is None:
+            # The model cannot think.  A request to enable (`True` / a level) is
+            # dropped and warned; disabling (`False`) is a harmless no-op.
+            if thinking is not False:
+                warnings.append(self._thinking_dropped(settings))
+            return omit, None
+
+        elif thinking is False:
+            if mode == "always_on":
+                warnings.append(
+                    self._thinking_dropped(
+                        settings,
+                        "the model's thinking is always on and cannot be disabled",
+                    )
+                )
+                return omit, None
+            else:
+                return ThinkingConfigDisabledParam(type="disabled"), None
+
+        elif mode == "budget":
+            budget = _THINKING_BUDGET_TOKENS[thinking]
+            if settings.max_tokens is not None and budget >= settings.max_tokens:
+                warnings.append(
+                    self._thinking_dropped(
+                        settings,
+                        f"the thinking budget of {budget} tokens does not fit "
+                        f"max_tokens={settings.max_tokens}",
+                    )
+                )
+                return omit, None
+            else:
+                return (
+                    ThinkingConfigEnabledParam(type="enabled", budget_tokens=budget),
+                    None,
+                )
+
+        else:
+            # Adaptive or always-on: both take `{"type": "adaptive"}`.
+            # `thinking` is `True` or a level; the level sets effort.
+            effort = thinking if isinstance(thinking, str) else None
+            return ThinkingConfigAdaptiveParam(type="adaptive"), effort
+
+    def _thinking_dropped(
+        self,
+        settings: ModelSettings,
+        reason: str | None = None,
+    ) -> UnsupportedSettingRunWarning:
+        """Build the warning for a `thinking` request that was dropped.
+
+        `reason` is an optional standalone explanation of why the request could
+        not be honored; it is `None` when the generic message already says
+        enough.
+        """
+
+        return UnsupportedSettingRunWarning(
+            setting_name="thinking",
+            setting_value=settings.thinking,
+            reason=reason,
+            provider=self.name,
+            model=settings.model,
+        )
 
     @staticmethod
     def _to_tool_param(tool: Tool[Any, Any, Any]) -> ToolParam:

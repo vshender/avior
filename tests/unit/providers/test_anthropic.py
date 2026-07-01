@@ -27,6 +27,7 @@ from pydantic import BaseModel
 
 from avior.core.context import RunContext
 from avior.core.exceptions import (
+    AviorUsageError,
     ProviderConnectionError,
     ProviderError,
     ProviderHTTPError,
@@ -55,10 +56,16 @@ def _settings(
     model: str = "claude-test",
     max_tokens: int | None = None,
     temperature: float | None = None,
+    thinking: bool | Literal["low", "medium", "high"] | None = None,
 ) -> ModelSettings:
     """Construct `ModelSettings` with sensible defaults for tests."""
 
-    return ModelSettings(model=model, max_tokens=max_tokens, temperature=temperature)
+    return ModelSettings(
+        model=model,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        thinking=thinking,
+    )
 
 
 def _response(*texts: str, usage: Usage | None = None) -> AnthropicMessage:
@@ -191,6 +198,43 @@ async def test_provider_prefers_explicit_client_over_api_key() -> None:
 
     # THEN the supplied client handles the call (proven by its preset response)
     assert result.message.text == "Hi from supplied client"
+
+
+# Capability tests
+# -----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        ("claude-opus-4-8", True),
+        ("claude-fable-5", True),
+        ("claude-haiku-4-5", True),
+        ("claude-haiku-4-5-20251001", True),
+        ("claude-opus-4-0", False),
+        ("gpt-4", False),
+    ],
+    ids=["adaptive", "always-on", "budget", "dated-snapshot", "no-thinking", "foreign"],
+)
+def test_model_capabilities_reports_thinking_support(
+    model: str,
+    expected: bool,
+) -> None:
+    """`model_capabilities` reports `supports_thinking` per the model's mode.
+
+    A model with any known thinking mode (adaptive, always-on, or budget) is
+    capable; an unknown or non-Anthropic model is not.  Matching is by prefix,
+    so a dated snapshot resolves like its alias.
+    """
+
+    # GIVEN a provider (its client is never used to read capabilities)
+    provider = _provider(AsyncMock())
+
+    # WHEN the model's capabilities are read
+    capabilities = provider.model_capabilities(model)
+
+    # THEN `supports_thinking` reflects whether the model has a thinking mode
+    assert capabilities.supports_thinking is expected
 
 
 # Behavioural tests on `complete()`
@@ -814,6 +858,214 @@ async def test_complete_sends_tool_message_as_user_tool_result_blocks() -> None:
             },
         ],
     }
+
+
+# Thinking config (send) tests
+# -----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("model", "thinking", "expected_thinking", "expected_effort"),
+    [
+        ("claude-opus-4-8", True, {"type": "adaptive"}, None),
+        ("claude-opus-4-8", "high", {"type": "adaptive"}, "high"),
+        ("claude-opus-4-8", "low", {"type": "adaptive"}, "low"),
+        ("claude-opus-4-8", False, {"type": "disabled"}, None),
+        ("claude-haiku-4-5", True, {"type": "enabled", "budget_tokens": 10000}, None),
+        ("claude-haiku-4-5", "high", {"type": "enabled", "budget_tokens": 16384}, None),
+        ("claude-opus-4-8", None, None, None),
+    ],
+    ids=[
+        "adaptive-true",
+        "adaptive-high",
+        "adaptive-low",
+        "adaptive-disabled",
+        "budget-true",
+        "budget-high",
+        "unset",
+    ],
+)
+async def test_complete_maps_thinking_to_native_config(
+    model: str,
+    thinking: bool | Literal["low", "medium", "high"] | None,
+    expected_thinking: dict[str, object] | None,
+    expected_effort: str | None,
+) -> None:
+    """`complete` maps the portable `thinking` setting to Anthropic's native
+    `thinking` / `output_config` parameters.
+
+    An adaptive model uses `{"type": "adaptive"}` with the level as
+    `output_config.effort`; a budget model uses `{"type": "enabled",
+    "budget_tokens": N}`; `None` sends neither parameter.
+    """
+
+    # GIVEN a mock client and settings carrying the portable `thinking` value
+    mock_client = _mock_client_returning(_response("ok"))
+    provider = _provider(mock_client)
+    settings = _settings(model=model, thinking=thinking)
+
+    # WHEN `complete` is invoked
+    await provider.complete([UserMessage.from_text("hi")], settings)
+
+    # THEN the native `thinking` and `output_config` parameters match the mode
+    call_kwargs = mock_client.messages.create.call_args.kwargs
+    if expected_thinking is None:
+        assert call_kwargs["thinking"] is omit
+    else:
+        assert call_kwargs["thinking"] == expected_thinking
+    if expected_effort is None:
+        assert call_kwargs["output_config"] is omit
+    else:
+        assert call_kwargs["output_config"] == {"effort": expected_effort}
+
+
+@pytest.mark.parametrize(
+    ("model", "thinking", "max_tokens", "expected_reason"),
+    [
+        ("claude-test", True, None, None),
+        (
+            "claude-fable-5",
+            False,
+            None,
+            "the model's thinking is always on and cannot be disabled",
+        ),
+        (
+            "claude-haiku-4-5",
+            "high",
+            8000,
+            "the thinking budget of 16384 tokens does not fit max_tokens=8000",
+        ),
+    ],
+    ids=["incapable-model", "always-on-disable", "budget-exceeds-max"],
+)
+async def test_complete_warns_and_drops_unhonorable_thinking(
+    model: str,
+    thinking: bool | Literal["low", "medium", "high"],
+    max_tokens: int | None,
+    expected_reason: str | None,
+) -> None:
+    """`complete` drops a `thinking` request the model cannot honor and warns.
+
+    Covers a model with no thinking support, an always-on model asked to
+    disable thinking, and a budget whose tokens do not fit an explicit
+    `max_tokens`.  Only the last two carry a `reason`; the incapable-model case
+    leaves it `None`.
+    """
+
+    # GIVEN a mock client and settings whose `thinking` cannot be honored
+    mock_client = _mock_client_returning(_response("ok"))
+    provider = _provider(mock_client)
+    settings = _settings(model=model, thinking=thinking, max_tokens=max_tokens)
+
+    # WHEN `complete` is awaited
+    result = await provider.complete([UserMessage.from_text("hi")], settings)
+
+    # THEN no thinking config is sent, and a warning records the dropped setting
+    assert mock_client.messages.create.call_args.kwargs["thinking"] is omit
+    assert len(result.warnings) == 1
+    assert result.warnings[0].setting_name == "thinking"
+    assert result.warnings[0].reason == expected_reason
+
+
+async def test_complete_keeps_budget_thinking_that_fits_explicit_max_tokens() -> None:
+    """A budget that fits an explicit `max_tokens` is sent, not dropped."""
+
+    # GIVEN settings with a budget model, a high level, and room in `max_tokens`
+    mock_client = _mock_client_returning(_response("ok"))
+    provider = _provider(mock_client)
+    settings = _settings(model="claude-haiku-4-5", thinking="high", max_tokens=20000)
+
+    # WHEN `complete` is awaited
+    result = await provider.complete([UserMessage.from_text("hi")], settings)
+
+    # THEN the budget thinking is sent and no warning is raised
+    call_kwargs = mock_client.messages.create.call_args.kwargs
+    assert call_kwargs["thinking"] == {"type": "enabled", "budget_tokens": 16384}
+    assert result.warnings == []
+
+
+async def test_complete_provider_options_effort_overrides_level() -> None:
+    """A raw `effort` in `provider_options` overrides the level effort."""
+
+    # GIVEN settings with an adaptive model, a portable level, and a raw
+    # `effort` override
+    mock_client = _mock_client_returning(_response("ok"))
+    provider = _provider(mock_client)
+    settings = ModelSettings(
+        model="claude-opus-4-8",
+        thinking="low",
+        provider_options={"anthropic": {"effort": "xhigh"}},
+    )
+
+    # WHEN `complete` is invoked
+    await provider.complete([UserMessage.from_text("hi")], settings)
+
+    # THEN adaptive thinking is sent with the raw effort, not the level's
+    call_kwargs = mock_client.messages.create.call_args.kwargs
+    assert call_kwargs["thinking"] == {"type": "adaptive"}
+    assert call_kwargs["output_config"] == {"effort": "xhigh"}
+
+
+async def test_complete_provider_options_thinking_overrides_shared() -> None:
+    """A raw `thinking` in `provider_options` overrides the portable setting."""
+
+    # GIVEN settings with `thinking=True` and a raw `thinking` override
+    mock_client = _mock_client_returning(_response("ok"))
+    provider = _provider(mock_client)
+    settings = ModelSettings(
+        model="claude-opus-4-8",
+        thinking=True,
+        provider_options={"anthropic": {"thinking": {"type": "disabled"}}},
+    )
+
+    # WHEN `complete` is invoked
+    await provider.complete([UserMessage.from_text("hi")], settings)
+
+    # THEN the raw thinking config is sent, not the portable mapping
+    call_kwargs = mock_client.messages.create.call_args.kwargs
+    assert call_kwargs["thinking"] == {"type": "disabled"}
+
+
+async def test_complete_rejects_unknown_provider_options_key() -> None:
+    """An unknown key in the `anthropic` options slice is rejected."""
+
+    # GIVEN a `provider_options` slice carrying an unknown key
+    mock_client = _mock_client_returning(_response("ok"))
+    provider = _provider(mock_client)
+    settings = ModelSettings(
+        model="claude-opus-4-8",
+        provider_options={"anthropic": {"bogus": 1}},
+    )
+
+    # WHEN `complete` is invoked
+    # THEN validation rejects the slice before any request is sent
+    with pytest.raises(AviorUsageError):
+        await provider.complete([UserMessage.from_text("hi")], settings)
+    mock_client.messages.create.assert_not_called()
+
+
+async def test_complete_sends_raw_thinking_on_unclassified_model() -> None:
+    """A raw `thinking` slice is sent even on a model avior does not classify.
+
+    The `provider_options` escape hatch bypasses avior's capability table, so a
+    thinking-capable model not yet in the table still works.
+    """
+
+    # GIVEN settings with a raw `thinking` slice on an unclassified model
+    mock_client = _mock_client_returning(_response("ok"))
+    provider = _provider(mock_client)
+    settings = ModelSettings(
+        model="claude-future-9",
+        provider_options={"anthropic": {"thinking": {"type": "adaptive"}}},
+    )
+
+    # WHEN `complete` is awaited
+    result = await provider.complete([UserMessage.from_text("hi")], settings)
+
+    # THEN the raw thinking is sent as-is, nothing dropped or warned
+    call_kwargs = mock_client.messages.create.call_args.kwargs
+    assert call_kwargs["thinking"] == {"type": "adaptive"}
+    assert result.warnings == []
 
 
 # Thinking round-trip tests
