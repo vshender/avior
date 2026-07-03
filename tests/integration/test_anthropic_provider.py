@@ -209,6 +209,33 @@ async def test_complete_returns_adaptive_thinking_against_anthropic(
     assert thinking_parts
 
 
+async def test_complete_drops_temperature_with_thinking_against_anthropic(
+    anthropic_provider: AnthropicProvider,
+) -> None:
+    """avior drops a `temperature` that thinking makes invalid, avoiding a 400.
+
+    Anthropic rejects a non-default `temperature` while thinking is active, and
+    returns a 400.  With thinking on and a custom temperature, avior drops the
+    temperature before sending, so the call succeeds and records the drop as a
+    warning.
+    """
+
+    # GIVEN settings with thinking on and a temperature Anthropic would reject
+    settings = ModelSettings(model=_MODEL, thinking="low", temperature=0.5)
+
+    # WHEN `complete` is awaited
+    result = await anthropic_provider.complete(
+        [UserMessage.from_text("What is 2 + 2?")],
+        settings,
+    )
+
+    # THEN the call succeeded (no 400) and a temperature warning was recorded
+    temperature_warnings = [
+        w for w in result.warnings if w.setting_name == "temperature"
+    ]
+    assert len(temperature_warnings) == 1
+
+
 async def test_runner_run_thinking_tool_chain_against_anthropic(
     anthropic_provider: AnthropicProvider,
 ) -> None:

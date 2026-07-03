@@ -125,6 +125,18 @@ them does not support thinking.
 """
 
 
+def _matches_prefix(model: str, prefix: str) -> bool:
+    """Whether `model` is `prefix` or extends it past a hyphen (`prefix-...`).
+
+    Matching stops at a hyphen boundary, so an alias like `claude-opus-4-8`
+    matches longer ids under it - for example its dated snapshot
+    `claude-opus-4-8-20260101` - but not a different model such as a future
+    `claude-opus-4-80`.
+    """
+
+    return model == prefix or model.startswith(prefix + "-")
+
+
 def _thinking_mode(model: str) -> _ThinkingMode | None:
     """Return how `model` accepts thinking, or `None` if it does not support it.
 
@@ -133,10 +145,7 @@ def _thinking_mode(model: str) -> _ThinkingMode | None:
     """
 
     for prefix, mode in _THINKING_MODES.items():
-        # Require the prefix to end at an identifier boundary, so an alias like
-        # `claude-opus-4-8` matches its dated snapshot `claude-opus-4-8-...` but
-        # not a different model such as a future `claude-opus-4-80`.
-        if model == prefix or model.startswith(prefix + "-"):
+        if _matches_prefix(model, prefix):
             return mode
 
     return None
@@ -156,6 +165,39 @@ defaults high enough (see `_MAX_NONSTREAMING_TOKENS`) that every level fits.
 
 type _ThinkingEffort = Literal["low", "medium", "high", "xhigh", "max"]
 """`output_config.effort` levels Anthropic accepts."""
+
+
+_DEFAULT_TEMPERATURE = 1
+"""The only `temperature` Anthropic accepts when sampling is constrained.
+
+Anthropic rejects any other `temperature` on a model that does not accept
+custom sampling parameters, and on any request with thinking active.
+Anthropic's `temperature` parameter defaults to this value, so sending it in a
+request is the same as omitting it.
+"""
+
+_NO_CUSTOM_SAMPLING_MODELS = frozenset(
+    {
+        "claude-sonnet-5",
+        "claude-opus-4-7",
+        "claude-opus-4-8",
+        "claude-fable-5",
+        "claude-mythos-5",
+    }
+)
+"""Model-id prefixes whose models reject a non-default `temperature`.
+
+These models never accept a custom `temperature`: any value other than
+`_DEFAULT_TEMPERATURE` returns an error, with or without thinking, so
+disabling thinking - where a model even allows it - does not make one
+acceptable.
+"""
+
+
+def _no_custom_sampling(model: str) -> bool:
+    """Whether `model` rejects a non-default `temperature` unconditionally."""
+
+    return any(_matches_prefix(model, prefix) for prefix in _NO_CUSTOM_SAMPLING_MODELS)
 
 
 class AnthropicProviderOptions(TypedDict, total=False):
@@ -261,6 +303,10 @@ class AnthropicProvider(Provider):
         - `max_tokens` - falls back to the model's maximum non-streaming
           output when `settings.max_tokens is None`.
         - `temperature` - forwarded only when explicitly set on `settings`.
+          A value other than `1` is dropped, with an
+          `UnsupportedSettingRunWarning`, when the model does not accept a
+          custom `temperature`, or when thinking is active in the request -
+          Anthropic rejects such a value in either case.
         - `thinking` - the portable level maps to the chosen model's native
           config: an adaptive model to `{"type": "adaptive"}` with an
           `output_config.effort`, a budget model to `{"type": "enabled",
@@ -319,9 +365,6 @@ class AnthropicProvider(Provider):
             if system_prompt is not None
             else omit
         )
-        temperature_param: float | Omit = (
-            settings.temperature if settings.temperature is not None else omit
-        )
         max_tokens = (
             settings.max_tokens
             if settings.max_tokens is not None
@@ -332,6 +375,11 @@ class AnthropicProvider(Provider):
         )
         warnings: list[RunWarning] = []
         thinking_param, output_config_param = self._resolve_thinking(settings, warnings)
+        temperature_param = self._resolve_temperature(
+            settings,
+            thinking_param,
+            warnings,
+        )
 
         try:
             response = await self._client.messages.create(
@@ -615,6 +663,62 @@ class AnthropicProvider(Provider):
             effort = thinking if isinstance(thinking, str) else None
             return ThinkingConfigAdaptiveParam(type="adaptive"), effort
 
+    def _resolve_temperature(
+        self,
+        settings: ModelSettings,
+        thinking_param: ThinkingConfigParam | Omit,
+        warnings: list[RunWarning],
+    ) -> float | Omit:
+        """Map `temperature` to the request, dropping a rejected value.
+
+        Anthropic rejects a `temperature` other than `_DEFAULT_TEMPERATURE`
+        in two cases:
+
+        - the model does not accept a custom `temperature` at all;
+        - the model is reasoning in this request, either because
+          `thinking_param` carries an enabling config or because the model
+          always reasons.
+
+        Such a value is dropped with an `UnsupportedSettingRunWarning`; the
+        default and an unset value pass through unchanged.
+        """
+
+        temperature = settings.temperature
+        if temperature is None:
+            return omit
+        if temperature == _DEFAULT_TEMPERATURE:
+            return temperature
+
+        # The model refuses a custom temperature regardless of thinking.
+        no_custom_sampling = _no_custom_sampling(settings.model)
+
+        # Thinking is active - the model reasons in this request - when an
+        # enabling config is sent (any type other than "disabled"), or the
+        # model is always-on and reasons regardless.  Otherwise the model does
+        # not reason: with no config it reasons only when asked, and a disabled
+        # config turns it off.
+        #
+        # Only a thinking config induces reasoning; an `output_config.effort` on
+        # its own does not, so it is not consulted here.
+        #
+        # The always-on models are also matched by `_no_custom_sampling` and
+        # caught above; naming them here keeps the predicate self-contained.
+        thinking_active = (
+            not isinstance(thinking_param, Omit)
+            and thinking_param["type"] != "disabled"
+        ) or _thinking_mode(settings.model) == "always_on"
+
+        if no_custom_sampling or thinking_active:
+            reason = (
+                "the model does not accept a custom temperature"
+                if no_custom_sampling
+                else "a custom temperature is not accepted while thinking is active"
+            )
+            warnings.append(self._sampling_dropped(settings, reason))
+            return omit
+
+        return temperature
+
     def _thinking_dropped(
         self,
         settings: ModelSettings,
@@ -630,6 +734,19 @@ class AnthropicProvider(Provider):
         return UnsupportedSettingRunWarning(
             setting_name="thinking",
             setting_value=settings.thinking,
+            reason=reason,
+            provider=self.name,
+            model=settings.model,
+        )
+
+    def _sampling_dropped(
+        self, settings: ModelSettings, reason: str
+    ) -> UnsupportedSettingRunWarning:
+        """Build the warning for a `temperature` that was dropped."""
+
+        return UnsupportedSettingRunWarning(
+            setting_name="temperature",
+            setting_value=settings.temperature,
             reason=reason,
             provider=self.name,
             model=settings.model,

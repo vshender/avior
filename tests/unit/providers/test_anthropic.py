@@ -1068,6 +1068,104 @@ async def test_complete_sends_raw_thinking_on_unclassified_model() -> None:
     assert result.warnings == []
 
 
+# Sampling-parameter compatibility tests
+# -----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("model", "thinking", "expected_reason"),
+    [
+        (
+            "claude-opus-4-8",
+            None,
+            "the model does not accept a custom temperature",
+        ),
+        (
+            "claude-opus-4-8-20260101",
+            None,
+            "the model does not accept a custom temperature",
+        ),
+        (
+            "claude-haiku-4-5",
+            "low",
+            "a custom temperature is not accepted while thinking is active",
+        ),
+    ],
+    ids=["no-sampling-model", "no-sampling-snapshot", "thinking-active"],
+)
+async def test_complete_drops_temperature_anthropic_rejects(
+    model: str,
+    thinking: Literal["low"] | None,
+    expected_reason: str,
+) -> None:
+    """`complete` drops a non-default `temperature` Anthropic would reject.
+
+    A model that does not accept custom sampling parameters - matched by prefix,
+    so a dated snapshot counts too - rejects it unconditionally; any model
+    rejects it while thinking is active.  Both drop it with a warning carrying
+    the cause.
+    """
+
+    # GIVEN settings with a non-default temperature Anthropic would reject
+    mock_client = _mock_client_returning(_response("ok"))
+    provider = _provider(mock_client)
+    settings = _settings(model=model, temperature=0.5, thinking=thinking)
+
+    # WHEN `complete` is awaited
+    result = await provider.complete([UserMessage.from_text("hi")], settings)
+
+    # THEN no temperature is sent, and a warning records the drop and its cause
+    assert mock_client.messages.create.call_args.kwargs["temperature"] is omit
+    temperature_warnings = [
+        w for w in result.warnings if w.setting_name == "temperature"
+    ]
+    assert len(temperature_warnings) == 1
+    assert temperature_warnings[0].setting_value == 0.5
+    assert temperature_warnings[0].reason == expected_reason
+
+
+@pytest.mark.parametrize(
+    ("model", "temperature", "thinking"),
+    [
+        ("claude-haiku-4-5", 0.5, None),
+        ("claude-sonnet-4-6", 0.5, False),
+        ("claude-opus-4-8", 1.0, True),
+        ("claude-opus-4-80", 0.5, None),
+        ("claude-future-9", 0.5, None),
+    ],
+    ids=[
+        "sampling-ok-no-thinking",
+        "thinking-disabled",
+        "default-temperature",
+        "no-sampling-near-miss",
+        "unclassified-model",
+    ],
+)
+async def test_complete_forwards_accepted_temperature(
+    model: str,
+    temperature: float,
+    thinking: bool | None,
+) -> None:
+    """`complete` forwards a `temperature` Anthropic accepts, without warning.
+
+    Anthropic accepts a custom `temperature` unless the model forbids it or
+    thinking is active, and always accepts the default `1`.  Each parametrized
+    case is one such accepted combination, named by its id.
+    """
+
+    # GIVEN settings with a temperature Anthropic accepts for the model
+    mock_client = _mock_client_returning(_response("ok"))
+    provider = _provider(mock_client)
+    settings = _settings(model=model, temperature=temperature, thinking=thinking)
+
+    # WHEN `complete` is awaited
+    result = await provider.complete([UserMessage.from_text("hi")], settings)
+
+    # THEN the temperature is sent and no sampling warning is raised
+    assert mock_client.messages.create.call_args.kwargs["temperature"] == temperature
+    assert [w for w in result.warnings if w.setting_name == "temperature"] == []
+
+
 # Thinking round-trip tests
 # -----------------------------------------------------------------------------
 
