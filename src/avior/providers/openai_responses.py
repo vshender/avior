@@ -15,6 +15,8 @@ import logging
 from collections.abc import Sequence
 from typing import Any, assert_never
 
+from pydantic import JsonValue
+
 try:
     import openai
     from openai import AsyncOpenAI
@@ -25,12 +27,14 @@ try:
         Response,
         ResponseFunctionToolCall,
         ResponseFunctionToolCallParam,
+        ResponseIncludable,
         ResponseInputItemParam,
         ResponseInputParam,
         ResponseOutputMessage,
         ResponseOutputRefusal,
         ResponseOutputText,
         ResponseReasoningItem,
+        ResponseReasoningItemParam,
         ResponseUsage,
     )
     from openai.types.responses.response_input_item_param import FunctionCallOutput
@@ -64,6 +68,31 @@ from avior.core.usage import Usage
 logger = logging.getLogger(__name__)
 
 
+def _supports_encrypted_reasoning(model: str) -> bool:
+    """Whether `model` accepts an encrypted reasoning item on a later request.
+
+    OpenAI's reasoning models return an opaque `encrypted_content` for each
+    reasoning step.  Under stateless operation (`store=False`) that content must
+    be replayed before its tool call, or the follow-up request is rejected.
+
+    - The o-series (`o1` / `o3` / `o4-mini` / ...) and the reasoning `gpt-5`
+      models (every `gpt-5` that is not a `-chat` variant) require the encrypted
+      reasoning item on replay.
+    - A `gpt-5*-chat` variant and the non-reasoning families (`gpt-4o` /
+      `gpt-4.1` / ...) reject such an item.
+    """
+
+    if model.startswith("gpt-5") and "-chat" not in model:
+        return True
+
+    # o-series: an `o` followed by a version digit (`o1` / `o3` / `o4-mini`).
+    # The digit check excludes an unrelated name that merely starts with `o`.
+    if model.startswith("o") and model[1:2].isdigit():
+        return True
+
+    return False
+
+
 class OpenAIResponsesProvider(Provider):
     """Async adapter to OpenAI's Responses API.
 
@@ -71,14 +100,6 @@ class OpenAIResponsesProvider(Provider):
     input/output items.  Exceptions from the OpenAI SDK are translated to
     avior's provider-agnostic hierarchy (`ProviderError` and subclasses), with
     the original exception preserved as `__cause__`.
-
-    Known limitation - reasoning items: reasoning models (e.g. the o-series)
-    return reasoning items in their output, and with server-side state disabled
-    (`store=False`) OpenAI expects those items sent back on a follow-up request,
-    especially next to tool calls.  This provider does not decode them into the
-    transcript, so they are dropped.  A single-turn answer still works, but a
-    tool call from a reasoning model may be rejected on the continuation request
-    that returns the tool result.
     """
 
     def __init__(
@@ -125,7 +146,10 @@ class OpenAIResponsesProvider(Provider):
 
         `store=False` is always passed (stateless wire; no server-side
         history).  `temperature` and `max_output_tokens` are forwarded only
-        when explicitly set on `settings`.
+        when explicitly set on `settings`.  When the model supports encrypted
+        reasoning, `include=["reasoning.encrypted_content"]` is requested so the
+        reasoning items can be replayed before their tool calls on the next
+        turn.
 
         Args:
             messages: Conversation transcript (user / assistant / tool turns).
@@ -161,14 +185,28 @@ class OpenAIResponsesProvider(Provider):
 
         logger.debug("complete: model=%s, messages=%d", settings.model, len(messages))
 
+        # The replay of an encrypted reasoning item is gated on the destination
+        # model: a model without this capability rejects the item.
+        supports_encrypted_reasoning = _supports_encrypted_reasoning(settings.model)
+
         # A single avior message can expand to several Responses input items
         # (an assistant turn with tool calls becomes a `message` item plus one
         # `function_call` item per call; a tool turn becomes one or more
         # `function_call_output` items), so the wire input is flat-mapped.
         wire_input: ResponseInputParam = []
         for m in messages:
-            wire_input.extend(self._to_wire(m))
+            wire_input.extend(
+                self._to_wire(
+                    m,
+                    supports_encrypted_reasoning=supports_encrypted_reasoning,
+                )
+            )
 
+        # Encrypted reasoning content is returned only when asked for, and only
+        # a model that supports it accepts the request.
+        include_param: list[ResponseIncludable] | Omit = (
+            ["reasoning.encrypted_content"] if supports_encrypted_reasoning else omit
+        )
         instructions_param: str | Omit = (
             system_prompt if system_prompt is not None else omit
         )
@@ -189,6 +227,7 @@ class OpenAIResponsesProvider(Provider):
                 model=settings.model,
                 max_output_tokens=max_output_tokens_param,
                 temperature=temperature_param,
+                include=include_param,
                 tools=tools_param,
                 store=False,
             )
@@ -229,12 +268,7 @@ class OpenAIResponsesProvider(Provider):
                     parts.append(self._to_tool_call_part(item))
 
             elif isinstance(item, ResponseReasoningItem):
-                # Reasoning items appear by default for reasoning models.  This
-                # provider does not decode them into the transcript, so they are
-                # skipped - not raised - to keep reasoning models working for
-                # single-turn use.  See the class docstring for the continuation
-                # limitation.
-                continue
+                parts.append(self._to_thinking_part(item))
 
             else:
                 # An output item avior cannot represent yet (built-in tool
@@ -449,20 +483,47 @@ class OpenAIResponsesProvider(Provider):
         )
 
     @staticmethod
+    def _to_thinking_part(item: ResponseReasoningItem) -> ThinkingPart:
+        """Decode a Responses reasoning item into a `ThinkingPart`.
+
+        The summary entries (if any) join into the readable content.  The
+        reasoning item's `id` and `encrypted_content` are kept in
+        `provider_details` so the item can be replayed before its tool call on
+        the next request, which OpenAI requires under stateless operation.
+        `encrypted_content` is present only when it was requested and the model
+        supports it; it is stored when present.
+        """
+
+        content = "".join(summary.text for summary in item.summary)
+
+        provider_details: dict[str, JsonValue] = {"reasoning_id": item.id}
+        if item.encrypted_content is not None:
+            provider_details["encrypted_content"] = item.encrypted_content
+
+        return ThinkingPart(content=content, provider_details=provider_details)
+
     def _to_wire(
+        self,
         message: Message,
+        *,
+        supports_encrypted_reasoning: bool,
     ) -> list[ResponseInputItemParam]:
         """Convert an avior `Message` to Responses input items.
 
         Returns a list because, unlike a chat-style wire format, the Responses
-        API carries tool calls and tool results as their own top-level items
-        rather than nested in a message:
+        API carries reasoning, tool calls, and tool results as their own
+        top-level items rather than nested in a message:
 
         - `UserMessage` -> a single `user` message item.
-        - `AssistantMessage` -> a single `message` item with the assistant's
-          text (omitted when the turn is tool calls only), followed by one
-          `function_call` item per tool call in order.  The tool calls keep
-          their order, but the text is always hoisted ahead of them.
+        - `AssistantMessage` -> its parts, in order, each mapped to a wire item:
+
+          - a text part -> a `message` item;
+          - a reasoning step -> a `reasoning` item;
+          - a tool call -> a `function_call` item.
+
+          A reasoning item is echoed back only to the same provider, and only
+          when the destination model accepts it
+          (`supports_encrypted_reasoning`).
         - `ToolMessage` -> one `function_call_output` item per result, matched
           to its call by `call_id`.  The Responses API has no error flag on a
           tool output, so an error result is sent as its text content (the
@@ -482,17 +543,30 @@ class OpenAIResponsesProvider(Provider):
             case AssistantMessage():
                 items: list[ResponseInputItemParam] = []
 
-                if message.text:
-                    items.append(
-                        EasyInputMessageParam(
-                            role="assistant",
-                            type="message",
-                            content=message.text,
-                        )
-                    )
-
+                # Emit the parts in order so a reasoning item keeps its place
+                # immediately before the item it informed.
                 for part in message.parts:
                     match part:
+                        case TextPart():
+                            items.append(
+                                EasyInputMessageParam(
+                                    role="assistant",
+                                    type="message",
+                                    content=part.text,
+                                )
+                            )
+
+                        case ThinkingPart():
+                            reasoning_item = self._to_reasoning_item_param(
+                                message,
+                                part,
+                                supports_encrypted_reasoning=(
+                                    supports_encrypted_reasoning
+                                ),
+                            )
+                            if reasoning_item is not None:
+                                items.append(reasoning_item)
+
                         case ToolCallPart():
                             items.append(
                                 ResponseFunctionToolCallParam(
@@ -502,16 +576,7 @@ class OpenAIResponsesProvider(Provider):
                                     arguments=json.dumps(part.args),
                                 )
                             )
-                        case TextPart():
-                            # Text parts are already collected into a single
-                            # assistant message item above.
-                            continue
-                        case ThinkingPart():
-                            # Reasoning items are not decoded or echoed, so skip
-                            # them.  This is also correct for an item from a
-                            # different provider, whose opaque token must never
-                            # be sent to OpenAI.
-                            continue
+
                         case _:
                             assert_never(part)
 
@@ -529,3 +594,39 @@ class OpenAIResponsesProvider(Provider):
 
             case _:
                 assert_never(message)
+
+    def _to_reasoning_item_param(
+        self,
+        message: AssistantMessage,
+        part: ThinkingPart,
+        *,
+        supports_encrypted_reasoning: bool,
+    ) -> ResponseReasoningItemParam | None:
+        """Build the wire reasoning item to echo a reasoning step, or `None`.
+
+        A reasoning item round-trips only to the provider that produced it and
+        only to a destination model that accepts encrypted reasoning content:
+        the token is provider- and model-specific, and OpenAI rejects a foreign
+        one.  Returns `None` - dropping the part - when the turn came from a
+        different provider, the destination model does not support the token
+        (`supports_encrypted_reasoning` is false), or the part carries no token
+        to echo.
+        """
+
+        if message.provider_name != self.name:
+            return None
+        if not supports_encrypted_reasoning:
+            return None
+
+        details = part.provider_details or {}
+        reasoning_id = details.get("reasoning_id")
+        encrypted_content = details.get("encrypted_content")
+        if not isinstance(reasoning_id, str) or not isinstance(encrypted_content, str):
+            return None
+
+        return ResponseReasoningItemParam(
+            id=reasoning_id,
+            type="reasoning",
+            summary=[],
+            encrypted_content=encrypted_content,
+        )

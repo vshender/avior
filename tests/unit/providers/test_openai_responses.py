@@ -27,6 +27,7 @@ from openai.types.responses import (
 )
 from openai.types.responses.response import IncompleteDetails
 from openai.types.responses.response_function_web_search import ActionSearch
+from openai.types.responses.response_reasoning_item import Summary
 from openai.types.responses.response_usage import (
     InputTokensDetails,
     OutputTokensDetails,
@@ -45,6 +46,7 @@ from avior.core.messages import (
     Message,
     StopReason,
     TextPart,
+    ThinkingPart,
     ToolCallPart,
     ToolMessage,
     ToolResultError,
@@ -439,13 +441,23 @@ async def test_complete_returns_empty_parts_when_response_output_is_empty() -> N
     assert result.message.parts == []
 
 
-async def test_complete_skips_reasoning_item_keeping_other_output() -> None:
-    """A reasoning item is skipped, with the rest of the output still parsed."""
+async def test_complete_decodes_reasoning_item_into_thinking_part() -> None:
+    """A reasoning item decodes into a `ThinkingPart` before the message text.
 
-    # GIVEN a response carrying a reasoning item before a text message
+    The summary joins into the readable content, and the reasoning item's id and
+    `encrypted_content` are kept in `provider_details` for the round-trip.
+    """
+
+    # GIVEN a response carrying a reasoning item (summary + encrypted content)
+    # before a text message
     response = _response_with_output(
         [
-            ResponseReasoningItem(id="rs_1", type="reasoning", summary=[]),
+            ResponseReasoningItem(
+                id="rs_1",
+                type="reasoning",
+                summary=[Summary(type="summary_text", text="thinking")],
+                encrypted_content="enc-token",
+            ),
             ResponseOutputMessage(
                 id="msg_test",
                 type="message",
@@ -462,8 +474,156 @@ async def test_complete_skips_reasoning_item_keeping_other_output() -> None:
     # WHEN `complete` is awaited
     result = await provider.complete([UserMessage.from_text("hi")], _settings())
 
-    # THEN the reasoning item is skipped and the message text survives
-    assert result.message.text == "Hi!"
+    # THEN a `ThinkingPart` precedes the text, carrying the summary and the
+    # round-trip token
+    assert len(result.message.parts) == 2
+    thinking, text = result.message.parts
+    assert isinstance(thinking, ThinkingPart)
+    assert isinstance(text, TextPart)
+    assert thinking.content == "thinking"
+    assert thinking.provider_details == {
+        "reasoning_id": "rs_1",
+        "encrypted_content": "enc-token",
+    }
+    assert text.text == "Hi!"
+
+
+@pytest.mark.parametrize(
+    ("model", "supports_reasoning"),
+    [
+        ("o4-mini", True),
+        ("gpt-5", True),
+        ("gpt-5-chat-latest", False),
+        ("gpt-4.1-nano", False),
+    ],
+    ids=["o-series", "gpt-5", "gpt-5-chat", "non-reasoning-model"],
+)
+async def test_complete_requests_encrypted_reasoning_by_model(
+    model: str,
+    supports_reasoning: bool,
+) -> None:
+    """`complete` asks for encrypted reasoning content only when the model
+    supports it, and omits the request otherwise.
+    """
+
+    # GIVEN a mock client and settings for the given model
+    mock_client = _mock_client_returning(_response("ok"))
+    provider = _provider(mock_client)
+    settings = _settings(model=model)
+
+    # WHEN `complete` is invoked
+    await provider.complete([UserMessage.from_text("hi")], settings)
+
+    # THEN the request's `include` parameter tells OpenAI to return the
+    # encrypted reasoning content only for a reasoning model
+    include = mock_client.responses.create.call_args.kwargs["include"]
+    if supports_reasoning:
+        assert include == ["reasoning.encrypted_content"]
+    else:
+        assert include is omit
+
+
+async def test_complete_echoes_reasoning_item_with_its_round_trip_token() -> None:
+    """A `ThinkingPart` echoes back as a `reasoning` item carrying its token.
+
+    The provider rebuilds the wire reasoning item from `provider_details`: the
+    `reasoning_id` becomes the item `id` and the `encrypted_content` rides
+    along, so the reasoning round-trips to OpenAI intact.
+    """
+
+    # GIVEN a message history whose assistant turn, from this provider, carries
+    # a reasoning step ahead of its tool call
+    mock_client = _mock_client_returning(_response("ok"))
+    provider = _provider(mock_client)
+    history: list[Message] = [
+        UserMessage.from_text("weather?"),
+        AssistantMessage(
+            parts=[
+                ThinkingPart(
+                    content="I need to look up the weather in Paris.",
+                    provider_details={
+                        "reasoning_id": "rs_1",
+                        "encrypted_content": "enc-token",
+                    },
+                ),
+                ToolCallPart(
+                    call_id="call_1", tool_name="get_weather", args={"city": "Paris"}
+                ),
+            ],
+            stop_reason="tool_use",
+            provider_name="openai",
+        ),
+        ToolMessage(
+            parts=[
+                ToolResultPart(call_id="call_1", result=ToolResultOk(content="sunny"))
+            ]
+        ),
+    ]
+
+    # WHEN `complete` is invoked on a reasoning model
+    await provider.complete(history, _settings(model="o4-mini"))
+
+    # THEN the reasoning step is rebuilt as a `reasoning` item carrying its
+    # round-trip token, ahead of the `function_call`
+    wire_input = mock_client.responses.create.call_args.kwargs["input"]
+    assistant_items = wire_input[1:]
+    assert assistant_items[0] == {
+        "type": "reasoning",
+        "id": "rs_1",
+        "summary": [],
+        "encrypted_content": "enc-token",
+    }
+    assert [i["type"] for i in assistant_items] == [
+        "reasoning",
+        "function_call",
+        "function_call_output",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("model", "provider_name"),
+    [("o4-mini", "anthropic"), ("gpt-4.1-nano", "openai")],
+    ids=["foreign-provider", "non-reasoning-destination"],
+)
+async def test_complete_drops_reasoning_item_when_not_replayable(
+    model: str,
+    provider_name: str,
+) -> None:
+    """A reasoning item is left out when it cannot round-trip.
+
+    A reasoning item is echoed only back to the provider that produced it and
+    only to a destination model that accepts encrypted reasoning content;
+    otherwise the opaque token would be rejected, so the item is dropped.
+    """
+
+    # GIVEN a message history whose assistant reasoning cannot round-trip - it
+    # came from another provider, or targets a model that rejects it
+    mock_client = _mock_client_returning(_response("ok"))
+    provider = _provider(mock_client)
+    history: list[Message] = [
+        UserMessage.from_text("hi"),
+        AssistantMessage(
+            parts=[
+                ThinkingPart(
+                    content="thinking",
+                    provider_details={
+                        "reasoning_id": "rs_1",
+                        "encrypted_content": "enc-token",
+                    },
+                ),
+                TextPart(text="Hi!"),
+            ],
+            stop_reason="stop",
+            provider_name=provider_name,
+        ),
+    ]
+
+    # WHEN `complete` is invoked
+    await provider.complete(history, _settings(model=model))
+
+    # THEN no `reasoning` item is sent
+    wire_input = mock_client.responses.create.call_args.kwargs["input"]
+    assert "reasoning" not in [item["type"] for item in wire_input]
 
 
 async def test_complete_raises_on_unsupported_output_item() -> None:

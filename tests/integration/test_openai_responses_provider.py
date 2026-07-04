@@ -13,7 +13,7 @@ from pydantic import BaseModel
 from avior.core import Agent, ModelSettings, Runner
 from avior.core.context import RunContext
 from avior.core.exceptions import MaxTokensExceededError
-from avior.core.messages import AssistantMessage, ToolCallPart
+from avior.core.messages import AssistantMessage, ThinkingPart, ToolCallPart
 from avior.core.tools import Tool
 from avior.providers.openai_responses import OpenAIResponsesProvider
 
@@ -23,6 +23,10 @@ pytestmark = pytest.mark.skipif(
 )
 
 _MODEL = "gpt-4.1-nano"
+
+# A reasoning model, whose output carries reasoning items that must be replayed
+# before their tool calls on the continuation request.
+_REASONING_MODEL = "o4-mini"
 
 
 class _MagicNumberArgs(BaseModel):
@@ -139,3 +143,48 @@ async def test_runner_run_against_openai_calls_a_tool_end_to_end(
 
     # AND the final answer relays the tool's result
     assert "4242" in result.output
+
+
+async def test_runner_run_reasoning_tool_chain_against_openai(
+    openai_responses_provider: OpenAIResponsesProvider,
+) -> None:
+    """A reasoning-model tool round-trip completes against real OpenAI.
+
+    A reasoning model emits a reasoning item carrying an `encrypted_content`
+    alongside its tool call.  The provider replays that item before the tool
+    call on the continuation request, so the model's reasoning carries across
+    turns.  A completed run relaying the tool's result, with a `ThinkingPart`
+    present, proves the round-trip holds.
+    """
+
+    # GIVEN a reasoning-model agent offered a tool whose result it cannot know
+    tool = _MagicNumber()
+    agent = Agent(
+        instructions=(
+            "When asked for a city's magic number, you must call the "
+            "get_magic_number tool, then state the number it returns."
+        ),
+        model_settings=ModelSettings(model=_REASONING_MODEL, max_tokens=4096),
+        tools=[tool],
+    )
+
+    # WHEN we run a prompt that requires the tool
+    result = await Runner(provider=openai_responses_provider).run(
+        agent, "What is the magic number for Paris?"
+    )
+
+    # THEN the tool ran and the final answer relays its result, so the reasoning
+    # item round-tripped through the tool loop
+    assert tool.calls == ["Paris"]
+    assert "4242" in result.output
+
+    # AND the assistant turn carried a reasoning item (else the round-trip was
+    # never exercised)
+    thinking_parts = [
+        part
+        for message in result.messages
+        if isinstance(message, AssistantMessage)
+        for part in message.parts
+        if isinstance(part, ThinkingPart)
+    ]
+    assert thinking_parts
