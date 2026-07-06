@@ -125,18 +125,6 @@ them does not support thinking.
 """
 
 
-def _matches_prefix(model: str, prefix: str) -> bool:
-    """Whether `model` is `prefix` or extends it past a hyphen (`prefix-...`).
-
-    Matching stops at a hyphen boundary, so an alias like `claude-opus-4-8`
-    matches longer ids under it - for example its dated snapshot
-    `claude-opus-4-8-20260101` - but not a different model such as a future
-    `claude-opus-4-80`.
-    """
-
-    return model == prefix or model.startswith(prefix + "-")
-
-
 def _thinking_mode(model: str) -> _ThinkingMode | None:
     """Return how `model` accepts thinking, or `None` if it does not support it.
 
@@ -149,6 +137,18 @@ def _thinking_mode(model: str) -> _ThinkingMode | None:
             return mode
 
     return None
+
+
+def _matches_prefix(model: str, prefix: str) -> bool:
+    """Whether `model` is `prefix` or extends it past a hyphen (`prefix-...`).
+
+    Matching stops at a hyphen boundary, so an alias like `claude-opus-4-8`
+    matches longer ids under it - for example its dated snapshot
+    `claude-opus-4-8-20260101` - but not a different model such as a future
+    `claude-opus-4-80`.
+    """
+
+    return model == prefix or model.startswith(prefix + "-")
 
 
 _THINKING_BUDGET_TOKENS: dict[Literal[True, "low", "medium", "high"], int] = {
@@ -209,18 +209,18 @@ class AnthropicProviderOptions(TypedDict, total=False):
     validated.
     """
 
-    # Forbid unknown keys when validating the slice.  The type-checker ignores
-    # are needed because a `TypedDict` body normally holds only field
+    # Forbid unknown keys when validating the slice.  The type-checker ignore
+    # comments are needed because a `TypedDict` body normally holds only field
     # annotations, not this assignment.
     __pydantic_config__ = ConfigDict(  # type: ignore[misc]  # pyright: ignore
         extra="forbid"
     )
 
     thinking: ThinkingConfigParam
-    """A raw Anthropic thinking config, sent as-is in place of the portable
-    setting.  It bypasses the portable mapping, so it still drives thinking
-    on a model avior does not yet classify.  avior validates its shape against
-    the installed Anthropic SDK types before sending, so it must match that
+    """A raw Anthropic thinking config, passed through in place of the portable
+    setting.  It bypasses the portable mapping, so it still drives thinking on a
+    model avior does not yet classify.  avior validates its shape against the
+    installed Anthropic SDK types before sending, so it must match that
     version's config, not a newer one.
     """
 
@@ -307,7 +307,7 @@ class AnthropicProvider(Provider):
           `UnsupportedSettingRunWarning`, when the model does not accept a
           custom `temperature`, or when thinking is active in the request -
           Anthropic rejects such a value in either case.
-        - `thinking` - the portable level maps to the chosen model's native
+        - `thinking` - the portable setting maps to the chosen model's native
           config: an adaptive model to `{"type": "adaptive"}` with an
           `output_config.effort`, a budget model to `{"type": "enabled",
           "budget_tokens": N}`.  A request the model cannot honor is dropped,
@@ -333,6 +333,9 @@ class AnthropicProvider(Provider):
             the call metadata.
 
         Raises:
+            AviorUsageError: The `anthropic` `provider_options` slice is invalid
+                (an unknown key or a value of the wrong type), raised before
+                the request is sent.
             ProviderHTTPError: The provider returned a 4xx or 5xx HTTP response.
                 `status_code` carries the wire status.
             ProviderResponseValidationError: The provider returned a successful
@@ -577,7 +580,7 @@ class AnthropicProvider(Provider):
 
         The raw `anthropic` provider options take precedence over the portable
         `thinking` setting; `AnthropicProviderOptions` documents how they
-        combine.  Without them, the portable level maps to the model's native
+        combine.  Without them, the portable setting maps to the model's native
         shape - see `_portable_thinking`.
         """
 
@@ -622,10 +625,21 @@ class AnthropicProvider(Provider):
 
         mode = _thinking_mode(settings.model)
         if mode is None:
-            # The model cannot think.  A request to enable (`True` / a level) is
-            # dropped and warned; disabling (`False`) is a harmless no-op.
+            # The model is not a recognized thinking model.  A request to enable
+            # (`True` / a level) is dropped and warned; the reason is honest for
+            # both a model that genuinely does not think and one avior does not
+            # recognize, pointing to the `anthropic` provider options rather
+            # than claiming the model cannot think.  Disabling (`False`) is a
+            # harmless no-op.
             if thinking is not False:
-                warnings.append(self._thinking_dropped(settings))
+                warnings.append(
+                    self._thinking_dropped(
+                        settings,
+                        "the model is not a recognized thinking model; if it "
+                        "does think, configure thinking via the `anthropic` "
+                        "provider options",
+                    )
+                )
             return omit, None
 
         elif thinking is False:

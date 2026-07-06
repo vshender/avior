@@ -922,7 +922,13 @@ async def test_complete_maps_thinking_to_native_config(
 @pytest.mark.parametrize(
     ("model", "thinking", "max_tokens", "expected_reason"),
     [
-        ("claude-test", True, None, None),
+        (
+            "claude-test",
+            True,
+            None,
+            "the model is not a recognized thinking model; if it does think, "
+            "configure thinking via the `anthropic` provider options",
+        ),
         (
             "claude-fable-5",
             False,
@@ -936,7 +942,7 @@ async def test_complete_maps_thinking_to_native_config(
             "the thinking budget of 16384 tokens does not fit max_tokens=8000",
         ),
     ],
-    ids=["incapable-model", "always-on-disable", "budget-exceeds-max"],
+    ids=["unrecognized-model", "always-on-disable", "budget-exceeds-max"],
 )
 async def test_complete_warns_and_drops_unhonorable_thinking(
     model: str,
@@ -946,10 +952,9 @@ async def test_complete_warns_and_drops_unhonorable_thinking(
 ) -> None:
     """`complete` drops a `thinking` request the model cannot honor and warns.
 
-    Covers a model with no thinking support, an always-on model asked to
-    disable thinking, and a budget whose tokens do not fit an explicit
-    `max_tokens`.  Only the last two carry a `reason`; the incapable-model case
-    leaves it `None`.
+    Covers an unrecognized model, an always-on model asked to disable thinking,
+    and a budget whose tokens do not fit an explicit `max_tokens`.  Each carries
+    a `reason` explaining why the request could not be honored.
     """
 
     # GIVEN a mock client and settings whose `thinking` cannot be honored
@@ -1047,7 +1052,7 @@ async def test_complete_rejects_unknown_provider_options_key() -> None:
 async def test_complete_sends_raw_thinking_on_unclassified_model() -> None:
     """A raw `thinking` slice is sent even on a model avior does not classify.
 
-    The `provider_options` escape hatch bypasses avior's capability table, so a
+    The raw `provider_options` slice bypasses avior's capability table, so a
     thinking-capable model not yet in the table still works.
     """
 
