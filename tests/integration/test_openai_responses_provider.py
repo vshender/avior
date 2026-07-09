@@ -6,6 +6,7 @@ Not run by the default `make test` / unit-test path - invoked separately via
 """
 
 import os
+from typing import Literal
 
 import pytest
 from pydantic import BaseModel
@@ -13,7 +14,12 @@ from pydantic import BaseModel
 from avior.core import Agent, ModelSettings, Runner
 from avior.core.context import RunContext
 from avior.core.exceptions import MaxTokensExceededError
-from avior.core.messages import AssistantMessage, ThinkingPart, ToolCallPart
+from avior.core.messages import (
+    AssistantMessage,
+    ThinkingPart,
+    ToolCallPart,
+    UserMessage,
+)
 from avior.core.tools import Tool
 from avior.providers.openai_responses import OpenAIResponsesProvider
 
@@ -27,6 +33,12 @@ _MODEL = "gpt-4.1-nano"
 # A reasoning model, whose output carries reasoning items that must be replayed
 # before their tool calls on the continuation request.
 _REASONING_MODEL = "o4-mini"
+
+# A model whose reasoning is optional: off by default and with
+# `reasoning.effort="none"`, turned on with an effort level.  The portable
+# `thinking=True` enables it and `thinking=False` disables it (on the
+# always-on o-series, `True` is a no-op and `False` is refused).
+_OPTIONAL_MODEL = "gpt-5.1"
 
 
 class _MagicNumberArgs(BaseModel):
@@ -188,3 +200,87 @@ async def test_runner_run_reasoning_tool_chain_against_openai(
         if isinstance(part, ThinkingPart)
     ]
     assert thinking_parts
+
+
+@pytest.mark.parametrize("thinking", [True, "high"])
+async def test_complete_enables_reasoning_on_optional_model_against_openai(
+    thinking: bool | Literal["low", "medium", "high"],
+    openai_responses_provider: OpenAIResponsesProvider,
+) -> None:
+    """A truthy portable `thinking` turns reasoning on an `optional` model.
+
+    An `optional` model does not reason by default, so a truthy `thinking` must
+    send an explicit `reasoning.effort` (`True` -> a default effort, a level ->
+    that effort); the assistant turn then carries a `ThinkingPart`, proving
+    reasoning was actually enabled (not left at the off default).
+    """
+
+    # GIVEN settings that enable reasoning through the portable knob
+    settings = ModelSettings(model=_OPTIONAL_MODEL, thinking=thinking, max_tokens=2048)
+
+    # WHEN `complete` is awaited on a prompt that needs reasoning
+    result = await openai_responses_provider.complete(
+        [UserMessage.from_text("What is 17 * 23?  Reason step by step.")],
+        settings,
+    )
+
+    # THEN the model reasoned and no warning was raised
+    thinking_parts = [p for p in result.message.parts if isinstance(p, ThinkingPart)]
+    assert thinking_parts
+    assert result.warnings == []
+
+
+async def test_complete_disables_reasoning_against_openai(
+    openai_responses_provider: OpenAIResponsesProvider,
+) -> None:
+    """The portable `thinking=False` turns reasoning off on a capable model.
+
+    Sending `thinking=False` maps to `reasoning.effort="none"`; the call must be
+    accepted (no 400), raise no warning, and the assistant turn must carry no
+    `ThinkingPart`, proving the model did not reason.
+    """
+
+    # GIVEN settings that disable reasoning through the portable setting
+    settings = ModelSettings(model=_OPTIONAL_MODEL, thinking=False, max_tokens=2048)
+
+    # WHEN `complete` is awaited on a prompt that would otherwise reason
+    result = await openai_responses_provider.complete(
+        [UserMessage.from_text("What is 17 * 23?  Reason step by step.")],
+        settings,
+    )
+
+    # THEN the model did not reason and no warning was raised
+    thinking_parts = [p for p in result.message.parts if isinstance(p, ThinkingPart)]
+    assert thinking_parts == []
+    assert result.warnings == []
+
+
+async def test_complete_returns_reasoning_summary_against_openai(
+    openai_responses_provider: OpenAIResponsesProvider,
+) -> None:
+    """A raw `reasoning` option with a summary yields readable thinking text.
+
+    The portable level does not request a summary, so it is asked for through
+    the raw `reasoning` provider option (`summary="auto"`).  The reasoning item
+    then carries summary text, which decodes into the `ThinkingPart` content.
+    """
+
+    # GIVEN settings whose raw reasoning option requests a summary
+    settings = ModelSettings(
+        model=_REASONING_MODEL,
+        max_tokens=2048,
+        provider_options={
+            "openai": {"reasoning": {"effort": "high", "summary": "auto"}}
+        },
+    )
+
+    # WHEN `complete` is awaited on a prompt that needs reasoning
+    result = await openai_responses_provider.complete(
+        [UserMessage.from_text("What is 17 * 23?  Reason step by step.")],
+        settings,
+    )
+
+    # THEN a thinking block carries the summary text
+    thinking_parts = [p for p in result.message.parts if isinstance(p, ThinkingPart)]
+    assert thinking_parts
+    assert any(p.content.strip() for p in thinking_parts)

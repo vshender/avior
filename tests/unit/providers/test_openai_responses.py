@@ -32,10 +32,11 @@ from openai.types.responses.response_usage import (
     InputTokensDetails,
     OutputTokensDetails,
 )
-from pydantic import BaseModel
+from pydantic import BaseModel, JsonValue
 
 from avior.core.context import RunContext
 from avior.core.exceptions import (
+    AviorUsageError,
     ProviderConnectionError,
     ProviderError,
     ProviderHTTPError,
@@ -64,10 +65,18 @@ def _settings(
     model: str = "gpt-test",
     max_tokens: int | None = None,
     temperature: float | None = None,
+    thinking: bool | Literal["low", "medium", "high"] | None = None,
+    provider_options: dict[str, dict[str, JsonValue]] | None = None,
 ) -> ModelSettings:
     """Construct `ModelSettings` with sensible defaults for tests."""
 
-    return ModelSettings(model=model, max_tokens=max_tokens, temperature=temperature)
+    return ModelSettings(
+        model=model,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        thinking=thinking,
+        provider_options=provider_options or {},
+    )
 
 
 def _response(*texts: str, usage: ResponseUsage | None = None) -> Response:
@@ -489,7 +498,7 @@ async def test_complete_decodes_reasoning_item_into_thinking_part() -> None:
 
 
 @pytest.mark.parametrize(
-    ("model", "supports_reasoning"),
+    ("model", "reasoning_active"),
     [
         ("o4-mini", True),
         ("gpt-5", True),
@@ -500,10 +509,13 @@ async def test_complete_decodes_reasoning_item_into_thinking_part() -> None:
 )
 async def test_complete_requests_encrypted_reasoning_by_model(
     model: str,
-    supports_reasoning: bool,
+    reasoning_active: bool,
 ) -> None:
-    """`complete` asks for encrypted reasoning content only when the model
-    supports it, and omits the request otherwise.
+    """`complete` asks for encrypted reasoning content only when reasoning is
+    active for the request, and omits the request otherwise.
+
+    With `thinking` unset, an `always` model reasons and a `non_thinking` model
+    does not, so the model alone decides here.
     """
 
     # GIVEN a mock client and settings for the given model
@@ -515,9 +527,9 @@ async def test_complete_requests_encrypted_reasoning_by_model(
     await provider.complete([UserMessage.from_text("hi")], settings)
 
     # THEN the request's `include` parameter tells OpenAI to return the
-    # encrypted reasoning content only for a reasoning model
+    # encrypted reasoning content only when reasoning is active
     include = mock_client.responses.create.call_args.kwargs["include"]
-    if supports_reasoning:
+    if reasoning_active:
         assert include == ["reasoning.encrypted_content"]
     else:
         assert include is omit
@@ -592,12 +604,12 @@ async def test_complete_drops_reasoning_item_when_not_replayable(
     """A reasoning item is left out when it cannot round-trip.
 
     A reasoning item is echoed only back to the provider that produced it and
-    only to a destination model that accepts encrypted reasoning content;
-    otherwise the opaque token would be rejected, so the item is dropped.
+    only when reasoning is active for the request; otherwise the opaque token
+    would be rejected, so the item is dropped.
     """
 
     # GIVEN a message history whose assistant reasoning cannot round-trip - it
-    # came from another provider, or targets a model that rejects it
+    # came from another provider, or reasoning is not active for the request
     mock_client = _mock_client_returning(_response("ok"))
     provider = _provider(mock_client)
     history: list[Message] = [
@@ -624,6 +636,253 @@ async def test_complete_drops_reasoning_item_when_not_replayable(
     # THEN no `reasoning` item is sent
     wire_input = mock_client.responses.create.call_args.kwargs["input"]
     assert "reasoning" not in [item["type"] for item in wire_input]
+
+
+# Reasoning-config tests
+# -----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("model", "supports_thinking"),
+    [
+        ("o3", True),
+        ("gpt-5", True),
+        ("gpt-5.4-mini", True),
+        ("gpt-5-chat-latest", False),
+        ("gpt-4o", False),
+        ("gpt-5.4-cyber", False),
+    ],
+    ids=[
+        "o-series",
+        "gpt-5",
+        "recognized-variant",
+        "gpt-5-chat",
+        "non-reasoning",
+        "unlisted-variant",
+    ],
+)
+def test_model_capabilities_reports_thinking_for_reasoning_models(
+    model: str,
+    supports_thinking: bool,
+) -> None:
+    """`model_capabilities` reports whether a model supports thinking.
+
+    A recognized named variant (`gpt-5.4-mini`) reports support, while an
+    unlisted specialized variant (`gpt-5.4-cyber`) is not recognized and reports
+    none - it can instead be driven through the raw provider options.
+    """
+
+    # GIVEN a provider
+    provider = _provider(_mock_client_returning(_response("ok")))
+
+    # WHEN the capabilities for the model are read
+    capabilities = provider.model_capabilities(model)
+
+    # THEN `supports_thinking` reflects whether the model reasons
+    assert capabilities.supports_thinking is supports_thinking
+
+
+@pytest.mark.parametrize(
+    ("model", "thinking", "expected_effort", "expect_warning"),
+    [
+        ("o4-mini", "high", "high", False),
+        ("o4-mini", True, None, False),
+        ("gpt-5.1", True, "medium", False),
+        ("o4-mini", None, None, False),
+        ("o4-mini", False, None, True),
+        ("gpt-5", False, None, True),
+        ("gpt-5-mini", False, None, True),
+        ("gpt-5.1", False, "none", False),
+        ("gpt-5.4-mini", False, "none", False),
+        ("gpt-5.3-codex", False, "none", False),
+        ("gpt-5.1-codex", False, None, True),
+        ("gpt-5.1-codex-max", False, None, True),
+        ("gpt-5.5-pro", False, None, True),
+        ("gpt-4o", "low", None, True),
+        ("gpt-4o", False, None, False),
+    ],
+    ids=[
+        "level-on-always",
+        "true-on-always",
+        "true-on-optional",
+        "unset",
+        "disable-on-always",
+        "disable-base-gpt5",
+        "disable-mini-on-always",
+        "disable-on-optional",
+        "disable-optional-variant",
+        "disable-codex-opt-in",
+        "disable-codex-under-optional-family",
+        "disable-codex-max-variant",
+        "disable-pro-under-optional-family",
+        "enable-on-non-reasoning",
+        "disable-on-non-reasoning",
+    ],
+)
+async def test_complete_maps_portable_thinking_to_reasoning(
+    model: str,
+    thinking: bool | Literal["low", "medium", "high"] | None,
+    expected_effort: str | None,
+    expect_warning: bool,
+) -> None:
+    """`complete` maps the portable `thinking` to OpenAI's `reasoning` param.
+
+    - a level becomes `reasoning.effort`;
+    - `True` enables reasoning: an `always` model keeps its own default (no
+      config), while an `optional` model gets the default effort (`medium`);
+    - `False` becomes `effort="none"` on an `optional` model, but is dropped
+      with a warning on an `always` one;
+    - enabling a non-reasoning model warns; disabling one is a silent no-op.
+    """
+
+    # GIVEN settings carrying the portable thinking value for the model
+    mock_client = _mock_client_returning(_response("ok"))
+    provider = _provider(mock_client)
+    settings = _settings(model=model, thinking=thinking)
+
+    # WHEN `complete` is awaited
+    result = await provider.complete([UserMessage.from_text("hi")], settings)
+
+    # THEN the `reasoning` kwarg and any warning match the mapping
+    reasoning = mock_client.responses.create.call_args.kwargs["reasoning"]
+    if expected_effort is None:
+        assert reasoning is omit
+    else:
+        assert reasoning == {"effort": expected_effort}
+    thinking_warnings = [w for w in result.warnings if w.setting_name == "thinking"]
+    assert len(thinking_warnings) == (1 if expect_warning else 0)
+
+
+async def test_complete_raw_reasoning_option_overrides_portable_thinking() -> None:
+    """A raw `reasoning` provider option overrides the portable mapping.
+
+    It is sent in place of the portable value, which is not consulted - so the
+    warning that value would otherwise raise never arises.
+    """
+
+    # GIVEN settings whose portable `thinking` would warn (disable on a
+    # reasoning model) alongside a raw `reasoning` option
+    mock_client = _mock_client_returning(_response("ok"))
+    provider = _provider(mock_client)
+    settings = _settings(
+        model="o4-mini",
+        thinking=False,
+        provider_options={
+            "openai": {"reasoning": {"effort": "low", "summary": "auto"}}
+        },
+    )
+
+    # WHEN `complete` is awaited
+    result = await provider.complete([UserMessage.from_text("hi")], settings)
+
+    # THEN the raw config is sent
+    assert mock_client.responses.create.call_args.kwargs["reasoning"] == {
+        "effort": "low",
+        "summary": "auto",
+    }
+    # AND no thinking warning is raised
+    assert [w for w in result.warnings if w.setting_name == "thinking"] == []
+
+
+async def test_complete_requests_encrypted_reasoning_for_raw_option() -> None:
+    """A raw `reasoning` option marks an unclassified model as a reasoning one.
+
+    The raw option drives reasoning on a model avior does not classify, so the
+    encrypted-content round-trip follows and `include` is requested.
+    """
+
+    # GIVEN an unclassified model carrying a raw `reasoning` option
+    mock_client = _mock_client_returning(_response("ok"))
+    provider = _provider(mock_client)
+    settings = _settings(
+        model="gpt-6-unknown",
+        provider_options={"openai": {"reasoning": {"effort": "high"}}},
+    )
+
+    # WHEN `complete` is awaited
+    await provider.complete([UserMessage.from_text("hi")], settings)
+
+    # THEN encrypted reasoning content is requested despite the unknown model
+    include = mock_client.responses.create.call_args.kwargs["include"]
+    assert include == ["reasoning.encrypted_content"]
+
+
+async def test_complete_omits_encrypted_reasoning_when_disabled() -> None:
+    """Disabling reasoning turns off the encrypted-content round-trip.
+
+    `thinking=False` on a disable-capable model sends `effort="none"`, so the
+    model produces no reasoning items; `include` must not ask for encrypted
+    content that will never come.
+    """
+
+    # GIVEN a disable-capable model with reasoning turned off
+    mock_client = _mock_client_returning(_response("ok"))
+    provider = _provider(mock_client)
+    settings = _settings(model="gpt-5.1", thinking=False)
+
+    # WHEN `complete` is awaited
+    await provider.complete([UserMessage.from_text("hi")], settings)
+
+    # THEN reasoning is disabled
+    kwargs = mock_client.responses.create.call_args.kwargs
+    assert kwargs["reasoning"] == {"effort": "none"}
+    # AND no encrypted content is requested
+    assert kwargs["include"] is omit
+
+
+async def test_complete_omits_prior_reasoning_item_when_disabled() -> None:
+    """Disabling reasoning also drops a prior reasoning item from the wire.
+
+    `thinking=False` on a disable-capable model makes reasoning inactive, so an
+    earlier same-provider reasoning step is not echoed back; its opaque token
+    would otherwise ride along a request that produces no reasoning.
+    """
+
+    # GIVEN a history whose same-provider assistant turn carries a reasoning
+    # step, and settings that disable reasoning
+    mock_client = _mock_client_returning(_response("ok"))
+    provider = _provider(mock_client)
+    history: list[Message] = [
+        UserMessage.from_text("weather?"),
+        AssistantMessage(
+            parts=[
+                ThinkingPart(
+                    content="checking",
+                    provider_details={
+                        "reasoning_id": "rs_1",
+                        "encrypted_content": "enc-token",
+                    },
+                ),
+                TextPart(text="Sunny."),
+            ],
+            stop_reason="stop",
+            provider_name="openai",
+        ),
+        UserMessage.from_text("and tomorrow?"),
+    ]
+    settings = _settings(model="gpt-5.1", thinking=False)
+
+    # WHEN `complete` is awaited
+    await provider.complete(history, settings)
+
+    # THEN the prior reasoning item is not echoed back
+    wire_input = mock_client.responses.create.call_args.kwargs["input"]
+    assert "reasoning" not in [item["type"] for item in wire_input]
+
+
+async def test_complete_rejects_invalid_openai_provider_options() -> None:
+    """An invalid `openai` provider-options slice raises `AviorUsageError`."""
+
+    # GIVEN settings with an unknown key in the openai provider options
+    mock_client = _mock_client_returning(_response("ok"))
+    provider = _provider(mock_client)
+    settings = _settings(provider_options={"openai": {"unknown": 1}})
+
+    # WHEN `complete` is awaited
+    # THEN it raises `AviorUsageError` before any request is sent
+    with pytest.raises(AviorUsageError):
+        await provider.complete([UserMessage.from_text("hi")], settings)
+    mock_client.responses.create.assert_not_called()
 
 
 async def test_complete_raises_on_unsupported_output_item() -> None:

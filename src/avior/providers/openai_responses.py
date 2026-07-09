@@ -13,9 +13,9 @@ Install via the optional extra: `pip install avior[openai]`.
 import json
 import logging
 from collections.abc import Sequence
-from typing import Any, assert_never
+from typing import Any, Literal, TypedDict, assert_never
 
-from pydantic import JsonValue
+from pydantic import ConfigDict, JsonValue, TypeAdapter
 
 try:
     import openai
@@ -38,6 +38,7 @@ try:
         ResponseUsage,
     )
     from openai.types.responses.response_input_item_param import FunctionCallOutput
+    from openai.types.shared_params import Reasoning
 except ImportError as e:
     raise ImportError(
         "The `openai` package is required to use `avior.providers.openai_responses`. "
@@ -61,36 +62,191 @@ from avior.core.messages import (
     ToolMessage,
     UserMessage,
 )
-from avior.core.provider import ModelSettings, Provider, ProviderResponse
+from avior.core.provider import (
+    ModelCapabilities,
+    ModelSettings,
+    Provider,
+    ProviderResponse,
+    resolve_provider_options,
+)
 from avior.core.tools import Tool
 from avior.core.usage import Usage
+from avior.core.warnings import RunWarning, UnsupportedSettingRunWarning
 
 logger = logging.getLogger(__name__)
 
 
-def _supports_encrypted_reasoning(model: str) -> bool:
-    """Whether `model` accepts an encrypted reasoning item on a later request.
+type _ReasoningMode = Literal["non_thinking", "always", "optional"]
+"""How a model treats reasoning.
 
-    OpenAI's reasoning models return an opaque `encrypted_content` for each
-    reasoning step.  Under stateless operation (`store=False`) that content must
-    be replayed before its tool call, or the follow-up request is rejected.
+- `non_thinking` - avior does not treat the model as reasoning: either a known
+  non-reasoning model or one it does not recognize.
+- `always` - the model reasons on every response and cannot be turned off.
+- `optional` - the model does not reason by default; reasoning is turned on
+  with an effort level or off with `effort="none"`.
+"""
 
-    - The o-series (`o1` / `o3` / `o4-mini` / ...) and the reasoning `gpt-5`
-      models (every `gpt-5` that is not a `-chat` variant) require the encrypted
-      reasoning item on replay.
-    - A `gpt-5*-chat` variant and the non-reasoning families (`gpt-4o` /
-      `gpt-4.1` / ...) reject such an item.
+
+_DEFAULT_EFFORT: Literal["medium"] = "medium"
+"""The effort that the portable `thinking=True` selects on an `optional` model.
+
+An `optional` model does not reason by default, so enabling it needs an explicit
+effort.  `medium` is a moderate default: a middle level that every `optional`
+model accepts, so `thinking=True` turns reasoning on without committing to the
+lightest or deepest setting.
+"""
+
+_REASONING_RULES: list[tuple[str | None, str | None, _ReasoningMode]] = [
+    (None, "chat", "non_thinking"),  # a `-chat` variant never reasons
+    (None, "pro", "always"),  # a `-pro` variant always reasons
+    ("gpt-5.3", "codex", "optional"),  # the one `-codex` that can disable reasoning
+    (None, "codex", "always"),  # other `-codex` variants always reason
+    (None, "codex-max", "always"),
+    (None, "codex-mini", "always"),
+    ("gpt-5", None, "always"),  # base `gpt-5` always reasons
+    ("gpt-5", "mini", "always"),
+    ("gpt-5", "nano", "always"),
+    ("gpt-5.1", None, "optional"),
+    ("gpt-5.2", None, "optional"),
+    ("gpt-5.4", None, "optional"),
+    ("gpt-5.4", "mini", "optional"),
+    ("gpt-5.4", "nano", "optional"),
+    ("gpt-5.5", None, "optional"),
+    ("o1", None, "always"),
+    ("o3", None, "always"),
+    ("o3", "mini", "always"),
+    ("o4", "mini", "always"),
+]
+"""Ordered rules mapping a model id to its `_ReasoningMode`; first match wins.
+
+Each rule is `(prefix, variant, mode)`:
+
+- `prefix` - the leading model id, a family like `o3` or a version like
+  `gpt-5.1`; `None` matches any family.
+- `variant` - an optional qualifier such as `mini` or `codex`; `None`
+  matches a family with no variant.  A variant is matched in full, so
+  `codex-max` needs its own rule rather than folding into `(None, "codex")`.
+- `mode` - the `_ReasoningMode` a matching model takes.
+
+A model matches when its id decomposes into the `prefix`, the `variant`, and a
+version tail (see `_rule_matches`).  So `(None, "codex")` is any `-codex` model,
+and `("gpt-5.1", None)` is `gpt-5.1` and its snapshots.
+
+The modes are seeded from probing the live OpenAI API, not derived from version
+numbers: `-codex` / `-pro` / `-chat` cut across versions irregularly
+(`gpt-5.3-codex` is the lone `-codex` that opts in), so this is a maintained
+table, not a formula.  A variant avior has not listed (`gpt-5.4-cyber` and the
+like) matches no rule and falls through to `non_thinking`; such a model can
+instead be driven through the raw `openai` provider options.
+
+Order matters only where one rule is a special case of another: the `gpt-5.3`
+`-codex` opt-in comes before the generic `-codex`.  The rest are mutually
+exclusive, so their order is free.
+"""
+
+
+def _reasoning_mode(model: str) -> _ReasoningMode:
+    """Return how `model` treats reasoning.
+
+    Applies `_REASONING_RULES` in order and returns the first match, or
+    `non_thinking` when no rule matches.
     """
 
-    if model.startswith("gpt-5") and "-chat" not in model:
-        return True
+    for prefix, variant, mode in _REASONING_RULES:
+        if _rule_matches(model, prefix, variant):
+            return mode
 
-    # o-series: an `o` followed by a version digit (`o1` / `o3` / `o4-mini`).
-    # The digit check excludes an unrelated name that merely starts with `o`.
-    if model.startswith("o") and model[1:2].isdigit():
-        return True
+    return "non_thinking"
 
-    return False
+
+def _rule_matches(model: str, prefix: str | None, variant: str | None) -> bool:
+    """Check whether `model` matches a `(prefix, variant)` rule.
+
+    A rule names a `prefix` (a model family or version) and an optional
+    `variant` (a qualifier such as `mini` or `codex`).  `model` matches when it
+    decomposes, in order, into:
+
+    - `prefix` - `model` must equal it or start with `prefix` + `-` (so `gpt-5`
+      matches `gpt-5` and `gpt-5-mini` but not `gpt-5.1`, which uses `.`).  A
+      `None` prefix matches any family.  The prefix normally marks where the
+      variant starts, so without one the variant is searched for from the end of
+      `model`.
+    - `variant` - the part after the prefix, matched in full: `(None, "codex")`
+      does not match `gpt-5.1-codex-max`.  A `None` variant requires nothing
+      after the prefix but a version tail.
+    - a version tail - what may trail the variant: nothing, `latest`, or a dated
+      snapshot (`2025-11-13`).
+
+    A rule must have a prefix or a variant; `(None, None)` matches nothing.
+    """
+
+    # Prefix: strip it from the front.  With no prefix the family length is
+    # unknown, so find where the variant begins by searching from the end.
+    if prefix is not None:
+        if model == prefix:
+            rest = ""
+        elif model.startswith(prefix + "-"):
+            rest = model[len(prefix) + 1 :]
+        else:
+            return False
+    elif variant is not None:
+        index = model.rfind("-" + variant)
+        if index == -1:
+            return False
+        rest = model[index + 1 :]
+    else:
+        # No prefix and no variant to match on; with nothing to identify a
+        # model, nothing matches.
+        return False
+
+    # Variant: consume it from the front of `rest`, leaving the version tail.
+    if variant is None:
+        version = rest
+    elif rest == variant:
+        version = ""
+    elif rest.startswith(variant + "-"):
+        version = rest[len(variant) + 1 :]
+    else:
+        return False
+
+    # Version tail: what remains must be empty, the `latest` alias, or a dated
+    # snapshot whose hyphen-separated parts are all digits (`2025-11-13`).
+    return (
+        version == ""
+        or version == "latest"
+        or all(part.isdigit() for part in version.split("-"))
+    )
+
+
+class OpenAIProviderOptions(TypedDict, total=False):
+    """OpenAI-specific `provider_options["openai"]` settings.
+
+    A raw OpenAI reasoning config, for control that the portable
+    `ModelSettings.thinking` setting does not reach.  It takes precedence over
+    that portable setting.  Unknown keys are rejected when the slice is
+    validated.
+    """
+
+    # Forbid unknown keys when validating the slice.  The type-checker ignore
+    # comments are needed because a `TypedDict` body normally holds only field
+    # annotations, not this assignment.
+    __pydantic_config__ = ConfigDict(  # type: ignore[misc]  # pyright: ignore
+        extra="forbid"
+    )
+
+    reasoning: Reasoning
+    """A raw OpenAI reasoning config, passed through in place of the portable
+    setting.  It bypasses the portable mapping, so it still drives reasoning on
+    a model avior does not yet classify, and reaches settings the portable
+    setting does not - notably `summary`, to ask for a human-readable reasoning
+    summary.
+    avior validates its shape against the installed OpenAI SDK types before
+    sending, so it must match that version's config, not a newer one.
+    """
+
+
+_OPENAI_OPTIONS_ADAPTER = TypeAdapter(OpenAIProviderOptions)
+"""`TypeAdapter` for the `provider_options["openai"]` slice."""
 
 
 class OpenAIResponsesProvider(Provider):
@@ -134,6 +290,18 @@ class OpenAIResponsesProvider(Provider):
 
         return "openai"
 
+    def model_capabilities(self, model: str) -> ModelCapabilities:
+        """Report what `model` supports.
+
+        Reports `supports_thinking=True` for a recognized reasoning model - one
+        that `_reasoning_mode` maps to a mode other than `non_thinking` - and
+        the conservative default otherwise.
+        """
+
+        return ModelCapabilities(
+            supports_thinking=_reasoning_mode(model) != "non_thinking"
+        )
+
     async def complete(
         self,
         messages: Sequence[Message],
@@ -144,12 +312,30 @@ class OpenAIResponsesProvider(Provider):
     ) -> ProviderResponse:
         """Send the conversation to OpenAI Responses and return the response.
 
-        `store=False` is always passed (stateless wire; no server-side
-        history).  `temperature` and `max_output_tokens` are forwarded only
-        when explicitly set on `settings`.  When the model supports encrypted
-        reasoning, `include=["reasoning.encrypted_content"]` is requested so the
-        reasoning items can be replayed before their tool calls on the next
-        turn.
+        `store=False` is always passed (stateless wire; no server-side history).
+        When reasoning is active for the request,
+        `include=["reasoning.encrypted_content"]` is requested so the reasoning
+        items can be replayed before their tool calls on the next turn.
+
+        The portable `settings` map to OpenAI's request as follows:
+
+        - `max_tokens` - sent as `max_output_tokens`, only when explicitly set
+          on `settings`; otherwise the model's own default applies.
+        - `temperature` - forwarded only when explicitly set on `settings`.
+        - `thinking` - the portable setting maps to a `reasoning` config chosen
+          by the model's reasoning mode (see `_ReasoningMode`):
+
+          - a level (`low` / `medium` / `high`) becomes `reasoning.effort`;
+          - `True` sends the default effort on an `optional` model and leaves an
+            `always` model's own default;
+          - `False` sends `reasoning.effort="none"` on an `optional` model.
+
+          A request the model cannot honor is dropped, with an
+          `UnsupportedSettingRunWarning` on the response: enabling reasoning on
+          a `non_thinking` model, or disabling it on an `always` model.
+
+          `provider_options["openai"]` overrides this mapping; see
+          `OpenAIProviderOptions`.
 
         Args:
             messages: Conversation transcript (user / assistant / tool turns).
@@ -168,6 +354,9 @@ class OpenAIResponsesProvider(Provider):
             the call metadata.
 
         Raises:
+            AviorUsageError: The `openai` `provider_options` slice is invalid
+                (an unknown key or a value of the wrong type), raised before
+                the request is sent.
             ProviderHTTPError: The provider returned a 4xx or 5xx HTTP response.
                 `status_code` carries the wire status.
             ProviderResponseValidationError: The provider returned a successful
@@ -185,9 +374,26 @@ class OpenAIResponsesProvider(Provider):
 
         logger.debug("complete: model=%s, messages=%d", settings.model, len(messages))
 
-        # The replay of an encrypted reasoning item is gated on the destination
-        # model: a model without this capability rejects the item.
-        supports_encrypted_reasoning = _supports_encrypted_reasoning(settings.model)
+        warnings: list[RunWarning] = []
+        reasoning_param = self._resolve_reasoning(settings, warnings)
+
+        # `effort="none"` is the off-switch: a portable `thinking=False` on an
+        # `optional` model and a raw `effort="none"` option both resolve to it.
+        reasoning_enabled = (
+            isinstance(reasoning_param, dict)
+            and reasoning_param.get("effort") != "none"
+        )
+
+        # Reasoning is active when an `always` model reasons on its own, or a
+        # reasoning config other than `effort="none"` was sent.  A raw config
+        # via provider options can enable reasoning even on a model avior does
+        # not recognize by name.  An `always` model stays active regardless; for
+        # an `optional` model a portable `thinking=False` resolves to
+        # `effort="none"` and turns the round-trip off.  An encrypted reasoning
+        # item is requested and replayed only when reasoning is active.
+        reasoning_active = (
+            _reasoning_mode(settings.model) == "always" or reasoning_enabled
+        )
 
         # A single avior message can expand to several Responses input items
         # (an assistant turn with tool calls becomes a `message` item plus one
@@ -195,17 +401,12 @@ class OpenAIResponsesProvider(Provider):
         # `function_call_output` items), so the wire input is flat-mapped.
         wire_input: ResponseInputParam = []
         for m in messages:
-            wire_input.extend(
-                self._to_wire(
-                    m,
-                    supports_encrypted_reasoning=supports_encrypted_reasoning,
-                )
-            )
+            wire_input.extend(self._to_wire(m, reasoning_active=reasoning_active))
 
         # Encrypted reasoning content is returned only when asked for, and only
-        # a model that supports it accepts the request.
+        # when reasoning is active for the request.
         include_param: list[ResponseIncludable] | Omit = (
-            ["reasoning.encrypted_content"] if supports_encrypted_reasoning else omit
+            ["reasoning.encrypted_content"] if reasoning_active else omit
         )
         instructions_param: str | Omit = (
             system_prompt if system_prompt is not None else omit
@@ -227,6 +428,7 @@ class OpenAIResponsesProvider(Provider):
                 model=settings.model,
                 max_output_tokens=max_output_tokens_param,
                 temperature=temperature_param,
+                reasoning=reasoning_param,
                 include=include_param,
                 tools=tools_param,
                 store=False,
@@ -315,6 +517,119 @@ class OpenAIResponsesProvider(Provider):
             response_id=response.id,
             model=response.model,
             provider_name=self.name,
+            warnings=warnings,
+        )
+
+    def _resolve_reasoning(
+        self,
+        settings: ModelSettings,
+        warnings: list[RunWarning],
+    ) -> Reasoning | Omit:
+        """Map the thinking settings to OpenAI's `reasoning` request parameter.
+
+        Returns the `reasoning` parameter, or `omit` when it should not be sent.
+
+        The raw `openai` provider options take precedence over the portable
+        `thinking` setting; `OpenAIProviderOptions` documents how they combine.
+        Without them, the portable setting maps to a `reasoning` config - see
+        `_portable_reasoning`.
+        """
+
+        options = resolve_provider_options(
+            settings,
+            self.name,
+            _OPENAI_OPTIONS_ADAPTER,
+        )
+        raw_reasoning = options.get("reasoning")
+        if raw_reasoning is not None:
+            return raw_reasoning
+        else:
+            return self._portable_reasoning(settings, warnings)
+
+    def _portable_reasoning(
+        self,
+        settings: ModelSettings,
+        warnings: list[RunWarning],
+    ) -> Reasoning | Omit:
+        """Map the portable `thinking` level to a `reasoning` config.
+
+        Returns the `reasoning` parameter (or `omit`), appending an
+        `UnsupportedSettingRunWarning` when a request is dropped.  `complete`
+        documents the mapping and the drop conditions.
+        """
+
+        thinking = settings.thinking
+        if thinking is None:
+            return omit
+
+        mode = _reasoning_mode(settings.model)
+        if mode == "non_thinking":
+            # The model is not a recognized reasoning model.  A request to
+            # enable (`True` / a level) is dropped and warned; the reason is
+            # honest for both a model that genuinely does not reason (`gpt-4o`)
+            # and one avior does not recognize, pointing to the `openai`
+            # provider options rather than claiming the model cannot reason.
+            # Disabling (`False`) is a harmless no-op.
+            if thinking is not False:
+                warnings.append(
+                    self._thinking_dropped(
+                        settings,
+                        "the model is not a recognized reasoning model; if it "
+                        "does reason, configure reasoning via the `openai` "
+                        "provider options",
+                    )
+                )
+            return omit
+
+        elif thinking is False:
+            match mode:
+                case "optional":
+                    return Reasoning(effort="none")
+                case "always":
+                    # Reasoning cannot be turned off.
+                    warnings.append(
+                        self._thinking_dropped(
+                            settings,
+                            "the model always reasons and cannot be disabled",
+                        )
+                    )
+                    return omit
+                case _:
+                    assert_never(mode)
+
+        elif thinking is True:
+            match mode:
+                case "optional":
+                    # An `optional` model does not reason by default, so
+                    # enabling it needs an explicit effort.
+                    return Reasoning(effort=_DEFAULT_EFFORT)
+                case "always":
+                    # The model already reasons at its own default depth.
+                    return omit
+                case _:
+                    assert_never(mode)
+
+        else:
+            return Reasoning(effort=thinking)
+
+    def _thinking_dropped(
+        self,
+        settings: ModelSettings,
+        reason: str | None = None,
+    ) -> UnsupportedSettingRunWarning:
+        """Build the warning for a `thinking` request that was dropped.
+
+        `reason` is an optional standalone explanation of why the request could
+        not be honored; it is `None` when the generic message already says
+        enough.
+        """
+
+        return UnsupportedSettingRunWarning(
+            setting_name="thinking",
+            setting_value=settings.thinking,
+            reason=reason,
+            provider=self.name,
+            model=settings.model,
         )
 
     async def aclose(self) -> None:
@@ -506,7 +821,7 @@ class OpenAIResponsesProvider(Provider):
         self,
         message: Message,
         *,
-        supports_encrypted_reasoning: bool,
+        reasoning_active: bool,
     ) -> list[ResponseInputItemParam]:
         """Convert an avior `Message` to Responses input items.
 
@@ -522,8 +837,7 @@ class OpenAIResponsesProvider(Provider):
           - a tool call -> a `function_call` item.
 
           A reasoning item is echoed back only to the same provider, and only
-          when the destination model accepts it
-          (`supports_encrypted_reasoning`).
+          when reasoning is active for the request (`reasoning_active` is true).
         - `ToolMessage` -> one `function_call_output` item per result, matched
           to its call by `call_id`.  The Responses API has no error flag on a
           tool output, so an error result is sent as its text content (the
@@ -560,9 +874,7 @@ class OpenAIResponsesProvider(Provider):
                             reasoning_item = self._to_reasoning_item_param(
                                 message,
                                 part,
-                                supports_encrypted_reasoning=(
-                                    supports_encrypted_reasoning
-                                ),
+                                reasoning_active=reasoning_active,
                             )
                             if reasoning_item is not None:
                                 items.append(reasoning_item)
@@ -600,22 +912,21 @@ class OpenAIResponsesProvider(Provider):
         message: AssistantMessage,
         part: ThinkingPart,
         *,
-        supports_encrypted_reasoning: bool,
+        reasoning_active: bool,
     ) -> ResponseReasoningItemParam | None:
         """Build the wire reasoning item to echo a reasoning step, or `None`.
 
         A reasoning item round-trips only to the provider that produced it and
-        only to a destination model that accepts encrypted reasoning content:
-        the token is provider- and model-specific, and OpenAI rejects a foreign
-        one.  Returns `None` - dropping the part - when the turn came from a
-        different provider, the destination model does not support the token
-        (`supports_encrypted_reasoning` is false), or the part carries no token
-        to echo.
+        only when reasoning is active for the request: the token is provider-
+        and model-specific, and OpenAI rejects a foreign one.  Returns `None` -
+        dropping the part - when the turn came from a different provider,
+        reasoning is not active for the request (`reasoning_active` is false),
+        or the part carries no token to echo.
         """
 
         if message.provider_name != self.name:
             return None
-        if not supports_encrypted_reasoning:
+        if not reasoning_active:
             return None
 
         details = part.provider_details or {}
