@@ -502,10 +502,19 @@ async def test_complete_decodes_reasoning_item_into_thinking_part() -> None:
     [
         ("o4-mini", True),
         ("gpt-5", True),
+        ("gpt-5.5", True),
+        ("gpt-5.1", False),
         ("gpt-5-chat-latest", False),
         ("gpt-4.1-nano", False),
     ],
-    ids=["o-series", "gpt-5", "gpt-5-chat", "non-reasoning-model"],
+    ids=[
+        "o-series",
+        "gpt-5",
+        "on-by-default",
+        "off-by-default",
+        "gpt-5-chat",
+        "non-reasoning-model",
+    ],
 )
 async def test_complete_requests_encrypted_reasoning_by_model(
     model: str,
@@ -514,8 +523,8 @@ async def test_complete_requests_encrypted_reasoning_by_model(
     """`complete` asks for encrypted reasoning content only when reasoning is
     active for the request, and omits the request otherwise.
 
-    With `thinking` unset, an `always` model reasons and a `non_thinking` model
-    does not, so the model alone decides here.
+    With `thinking` unset, the model's own default decides: an `always_on` or
+    `on_by_default` model reasons, the others do not.
     """
 
     # GIVEN a mock client and settings for the given model
@@ -648,17 +657,31 @@ async def test_complete_drops_reasoning_item_when_not_replayable(
         ("o3", True),
         ("gpt-5", True),
         ("gpt-5.4-mini", True),
+        ("gpt-5.6", True),
+        ("gpt-5.6-sol", True),
+        ("gpt-5.6-terra", True),
+        ("gpt-5.6-luna", True),
+        ("gpt-5.6-sol-2026-01-01", True),
         ("gpt-5-chat-latest", False),
         ("gpt-4o", False),
         ("gpt-5.4-cyber", False),
+        ("gpt-5.60", False),
+        ("gpt-5.6-solar", False),
     ],
     ids=[
         "o-series",
         "gpt-5",
         "recognized-variant",
+        "on-by-default",
+        "on-by-default-sol",
+        "on-by-default-terra",
+        "on-by-default-luna",
+        "on-by-default-tier-snapshot",
         "gpt-5-chat",
         "non-reasoning",
         "unlisted-variant",
+        "near-miss-version",
+        "near-miss-variant",
     ],
 )
 def test_model_capabilities_reports_thinking_for_reasoning_models(
@@ -688,6 +711,7 @@ def test_model_capabilities_reports_thinking_for_reasoning_models(
         ("o4-mini", "high", "high", False),
         ("o4-mini", True, None, False),
         ("gpt-5.1", True, "medium", False),
+        ("gpt-5.5", True, None, False),
         ("o4-mini", None, None, False),
         ("o4-mini", False, None, True),
         ("gpt-5", False, None, True),
@@ -695,6 +719,8 @@ def test_model_capabilities_reports_thinking_for_reasoning_models(
         ("gpt-5.1", False, "none", False),
         ("gpt-5.4-mini", False, "none", False),
         ("gpt-5.3-codex", False, "none", False),
+        ("gpt-5.5", False, "none", False),
+        ("gpt-5.6-sol", False, "none", False),
         ("gpt-5.1-codex", False, None, True),
         ("gpt-5.1-codex-max", False, None, True),
         ("gpt-5.5-pro", False, None, True),
@@ -702,19 +728,22 @@ def test_model_capabilities_reports_thinking_for_reasoning_models(
         ("gpt-4o", False, None, False),
     ],
     ids=[
-        "level-on-always",
-        "true-on-always",
-        "true-on-optional",
+        "level-on-always-on",
+        "true-on-always-on",
+        "true-on-off-by-default",
+        "true-on-on-by-default",
         "unset",
-        "disable-on-always",
+        "disable-on-always-on",
         "disable-base-gpt5",
-        "disable-mini-on-always",
-        "disable-on-optional",
-        "disable-optional-variant",
+        "disable-mini-on-always-on",
+        "disable-on-off-by-default",
+        "disable-off-by-default-variant",
         "disable-codex-opt-in",
-        "disable-codex-under-optional-family",
+        "disable-on-on-by-default",
+        "disable-on-on-by-default-tier",
+        "disable-codex-under-off-by-default-family",
         "disable-codex-max-variant",
-        "disable-pro-under-optional-family",
+        "disable-pro-under-on-by-default-family",
         "enable-on-non-reasoning",
         "disable-on-non-reasoning",
     ],
@@ -728,10 +757,11 @@ async def test_complete_maps_portable_thinking_to_reasoning(
     """`complete` maps the portable `thinking` to OpenAI's `reasoning` param.
 
     - a level becomes `reasoning.effort`;
-    - `True` enables reasoning: an `always` model keeps its own default (no
-      config), while an `optional` model gets the default effort (`medium`);
-    - `False` becomes `effort="none"` on an `optional` model, but is dropped
-      with a warning on an `always` one;
+    - `True` enables reasoning: a model that already reasons by default keeps
+      its own default (no config), while an `off_by_default` model gets the
+      default effort (`medium`);
+    - `False` becomes `effort="none"` on an `off_by_default` or `on_by_default`
+      model, but is dropped with a warning on an `always_on` one;
     - enabling a non-reasoning model warns; disabling one is a silent no-op.
     """
 
@@ -780,8 +810,38 @@ async def test_complete_raw_reasoning_option_overrides_portable_thinking() -> No
         "effort": "low",
         "summary": "auto",
     }
-    # AND no thinking warning is raised
+    # AND no thinking warning is recorded
     assert [w for w in result.warnings if w.setting_name == "thinking"] == []
+
+
+async def test_complete_raw_reasoning_none_overrides_portable_thinking() -> None:
+    """A raw `effort="none"` turns reasoning off despite a portable level.
+
+    The raw option replaces the portable mapping, so the request is not
+    reasoning-active: `effort="none"` is sent, and a custom `temperature` is
+    forwarded without a warning.
+    """
+
+    # GIVEN settings whose portable `thinking` would enable reasoning,
+    # alongside a raw `reasoning` option disabling it and a custom temperature
+    mock_client = _mock_client_returning(_response("ok"))
+    provider = _provider(mock_client)
+    settings = _settings(
+        model="gpt-5.5",
+        thinking="high",
+        temperature=0.3,
+        provider_options={"openai": {"reasoning": {"effort": "none"}}},
+    )
+
+    # WHEN `complete` is awaited
+    result = await provider.complete([UserMessage.from_text("hi")], settings)
+
+    # THEN `effort="none"` is sent, and the temperature is forwarded with no
+    # warning
+    create_kwargs = mock_client.responses.create.call_args.kwargs
+    assert create_kwargs["reasoning"] == {"effort": "none"}
+    assert create_kwargs["temperature"] == 0.3
+    assert result.warnings == []
 
 
 async def test_complete_requests_encrypted_reasoning_for_raw_option() -> None:
@@ -909,6 +969,118 @@ async def test_complete_raises_on_unsupported_output_item() -> None:
     # THEN `ProviderResponseValidationError` is raised
     with pytest.raises(ProviderResponseValidationError):
         await provider.complete([UserMessage.from_text("hi")], _settings())
+
+
+# Sampling-parameter compatibility tests
+# -----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("model", "thinking", "provider_options"),
+    [
+        ("o4-mini", None, None),
+        ("gpt-5.1", "medium", None),
+        ("gpt-5.5", None, None),
+        ("gpt-5.5", None, {"openai": {"reasoning": {"summary": "auto"}}}),
+        ("gpt-test", None, {"openai": {"reasoning": {"effort": "medium"}}}),
+    ],
+    ids=[
+        "always-on-model",
+        "off-by-default-with-effort",
+        "on-by-default-at-default",
+        "on-by-default-summary-only",
+        "raw-options-enable",
+    ],
+)
+async def test_complete_drops_temperature_openai_rejects(
+    model: str,
+    thinking: Literal["medium"] | None,
+    provider_options: dict[str, dict[str, JsonValue]] | None,
+) -> None:
+    """`complete` drops a non-default `temperature` OpenAI would reject.
+
+    OpenAI rejects a custom `temperature` whenever reasoning is active for the
+    request: on an `always_on` model unconditionally, on an `off_by_default`
+    model running with an effort, on an `on_by_default` model left at its
+    reasoning default (with or without a raw config lacking an effort), and
+    when a raw `provider_options` reasoning config enables reasoning on a
+    model avior does not classify.  Each drop carries a warning with the
+    cause.
+    """
+
+    # GIVEN settings with a non-default temperature OpenAI would reject
+    mock_client = _mock_client_returning(_response("ok"))
+    provider = _provider(mock_client)
+    settings = _settings(
+        model=model,
+        temperature=0.3,
+        thinking=thinking,
+        provider_options=provider_options,
+    )
+
+    # WHEN `complete` is awaited
+    result = await provider.complete([UserMessage.from_text("hi")], settings)
+
+    # THEN no temperature is sent, and a warning records the drop and its cause
+    assert mock_client.responses.create.call_args.kwargs["temperature"] is omit
+    temperature_warnings = [
+        w for w in result.warnings if w.setting_name == "temperature"
+    ]
+    assert len(temperature_warnings) == 1
+    assert temperature_warnings[0].setting_value == 0.3
+    assert temperature_warnings[0].reason == (
+        "a custom temperature is not accepted while reasoning is active"
+    )
+
+
+@pytest.mark.parametrize(
+    ("model", "temperature", "thinking", "provider_options"),
+    [
+        ("gpt-test", 0.3, None, None),
+        ("gpt-5.1", 0.3, None, None),
+        ("gpt-5.5", 0.3, False, None),
+        ("gpt-5.1", 1.0, "medium", None),
+        ("gpt-5.1", 0.3, None, {"openai": {"reasoning": {"summary": "auto"}}}),
+    ],
+    ids=[
+        "non-thinking-model",
+        "off-by-default-reasoning-unset",
+        "on-by-default-reasoning-disabled",
+        "default-temperature-with-effort",
+        "off-by-default-summary-only",
+    ],
+)
+async def test_complete_forwards_accepted_temperature(
+    model: str,
+    temperature: float,
+    thinking: bool | Literal["medium"] | None,
+    provider_options: dict[str, dict[str, JsonValue]] | None,
+) -> None:
+    """`complete` forwards a `temperature` OpenAI accepts, without warning.
+
+    OpenAI accepts a custom `temperature` whenever reasoning is not active for
+    the request - a non-reasoning model, an `off_by_default` model whose
+    reasoning is unset (even when a raw config carries only a summary), or any
+    model whose reasoning is disabled - and always accepts the default `1`.
+    Each parametrized case is one such accepted combination, named by its id.
+    """
+
+    # GIVEN settings with a temperature OpenAI accepts
+    mock_client = _mock_client_returning(_response("ok"))
+    provider = _provider(mock_client)
+    settings = _settings(
+        model=model,
+        temperature=temperature,
+        thinking=thinking,
+        provider_options=provider_options,
+    )
+
+    # WHEN `complete` is awaited
+    result = await provider.complete([UserMessage.from_text("hi")], settings)
+
+    # THEN the temperature is sent unchanged, with no warning
+    assert mock_client.responses.create.call_args.kwargs["temperature"] == temperature
+    assert result.warnings == []
 
 
 # Call-metadata mapping tests

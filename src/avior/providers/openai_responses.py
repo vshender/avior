@@ -76,48 +76,63 @@ from avior.core.warnings import RunWarning, UnsupportedSettingRunWarning
 logger = logging.getLogger(__name__)
 
 
-type _ReasoningMode = Literal["non_thinking", "always", "optional"]
+type _ReasoningMode = Literal["off_by_default", "on_by_default", "always_on"]
 """How a model treats reasoning.
 
-- `non_thinking` - avior does not treat the model as reasoning: either a known
-  non-reasoning model or one it does not recognize.
-- `always` - the model reasons on every response and cannot be turned off.
-- `optional` - the model does not reason by default; reasoning is turned on
-  with an effort level or off with `effort="none"`.
+- `"off_by_default"` - the model does not reason unless an effort level turns
+  reasoning on; `effort="none"` keeps it off.
+- `"on_by_default"` - the model reasons unless `effort="none"` turns reasoning
+  off.
+- `"always_on"` - the model reasons on every response and cannot be turned off,
+  so a request to disable it is dropped and the model keeps reasoning.
 """
 
 
 _DEFAULT_EFFORT: Literal["medium"] = "medium"
-"""The effort that the portable `thinking=True` selects on an `optional` model.
+"""The effort that `thinking=True` selects on an `off_by_default` model.
 
-An `optional` model does not reason by default, so enabling it needs an explicit
-effort.  `medium` is a moderate default: a middle level that every `optional`
-model accepts, so `thinking=True` turns reasoning on without committing to the
-lightest or deepest setting.
+An `off_by_default` model needs an explicit effort to start reasoning.  `medium`
+is a moderate default: a middle level that every `off_by_default` model accepts,
+so `thinking=True` turns reasoning on without committing to the lightest or
+deepest setting.
 """
 
-_REASONING_RULES: list[tuple[str | None, str | None, _ReasoningMode]] = [
-    (None, "chat", "non_thinking"),  # a `-chat` variant never reasons
-    (None, "pro", "always"),  # a `-pro` variant always reasons
-    ("gpt-5.3", "codex", "optional"),  # the one `-codex` that can disable reasoning
-    (None, "codex", "always"),  # other `-codex` variants always reason
-    (None, "codex-max", "always"),
-    (None, "codex-mini", "always"),
-    ("gpt-5", None, "always"),  # base `gpt-5` always reasons
-    ("gpt-5", "mini", "always"),
-    ("gpt-5", "nano", "always"),
-    ("gpt-5.1", None, "optional"),
-    ("gpt-5.2", None, "optional"),
-    ("gpt-5.4", None, "optional"),
-    ("gpt-5.4", "mini", "optional"),
-    ("gpt-5.4", "nano", "optional"),
-    ("gpt-5.5", None, "optional"),
-    ("o1", None, "always"),
-    ("o3", None, "always"),
-    ("o3", "mini", "always"),
-    ("o4", "mini", "always"),
+_DEFAULT_TEMPERATURE = 1
+"""The only `temperature` OpenAI accepts while reasoning is active.
+
+OpenAI rejects any other `temperature` on a request with reasoning active.
+OpenAI's `temperature` parameter defaults to this value, so sending it in a
+request is the same as omitting it.
+"""
+
+_REASONING_RULES: list[tuple[str | None, str | None, _ReasoningMode | None]] = [
+    (None, "chat", None),  # a `-chat` variant never reasons
+    (None, "pro", "always_on"),  # a `-pro` variant always reasons
+    # The one `-codex` that can disable reasoning:
+    ("gpt-5.3", "codex", "off_by_default"),
+    (None, "codex", "always_on"),  # other `-codex` variants always reason
+    (None, "codex-max", "always_on"),
+    (None, "codex-mini", "always_on"),
+    ("gpt-5", None, "always_on"),  # base `gpt-5` always reasons
+    ("gpt-5", "mini", "always_on"),
+    ("gpt-5", "nano", "always_on"),
+    ("gpt-5.1", None, "off_by_default"),
+    ("gpt-5.2", None, "off_by_default"),
+    ("gpt-5.4", None, "off_by_default"),
+    ("gpt-5.4", "mini", "off_by_default"),
+    ("gpt-5.4", "nano", "off_by_default"),
+    ("gpt-5.5", None, "on_by_default"),
+    ("gpt-5.6", None, "on_by_default"),
+    ("gpt-5.6", "sol", "on_by_default"),
+    ("gpt-5.6", "terra", "on_by_default"),
+    ("gpt-5.6", "luna", "on_by_default"),
+    ("o1", None, "always_on"),
+    ("o3", None, "always_on"),
+    ("o3", "mini", "always_on"),
+    ("o4", "mini", "always_on"),
 ]
-"""Ordered rules mapping a model id to its `_ReasoningMode`; first match wins.
+"""Ordered rules mapping a model id to its `_ReasoningMode` or to `None`;
+first match wins.
 
 Each rule is `(prefix, variant, mode)`:
 
@@ -126,7 +141,8 @@ Each rule is `(prefix, variant, mode)`:
 - `variant` - an optional qualifier such as `mini` or `codex`; `None`
   matches a family with no variant.  A variant is matched in full, so
   `codex-max` needs its own rule rather than folding into `(None, "codex")`.
-- `mode` - the `_ReasoningMode` a matching model takes.
+- `mode` - the `_ReasoningMode` a matching model takes, or `None` for a
+  model that is known not to reason.
 
 A model matches when its id decomposes into the `prefix`, the `variant`, and a
 version tail (see `_rule_matches`).  So `(None, "codex")` is any `-codex` model,
@@ -136,8 +152,8 @@ The modes are seeded from probing the live OpenAI API, not derived from version
 numbers: `-codex` / `-pro` / `-chat` cut across versions irregularly
 (`gpt-5.3-codex` is the lone `-codex` that opts in), so this is a maintained
 table, not a formula.  A variant avior has not listed (`gpt-5.4-cyber` and the
-like) matches no rule and falls through to `non_thinking`; such a model can
-instead be driven through the raw `openai` provider options.
+like) matches no rule and falls through to no mode; such a model can instead
+be driven through an explicit `effort` in the raw `openai` provider options.
 
 Order matters only where one rule is a special case of another: the `gpt-5.3`
 `-codex` opt-in comes before the generic `-codex`.  The rest are mutually
@@ -145,18 +161,34 @@ exclusive, so their order is free.
 """
 
 
-def _reasoning_mode(model: str) -> _ReasoningMode:
-    """Return how `model` treats reasoning.
+def _reasoning_mode(model: str) -> _ReasoningMode | None:
+    """Return how `model` treats reasoning, or `None` if avior does not treat
+    it as reasoning: either a known non-reasoning model or one it does not
+    recognize.
 
-    Applies `_REASONING_RULES` in order and returns the first match, or
-    `non_thinking` when no rule matches.
+    Applies `_REASONING_RULES` in order and returns the first match, or `None`
+    when no rule matches.
     """
 
     for prefix, variant, mode in _REASONING_RULES:
         if _rule_matches(model, prefix, variant):
             return mode
 
-    return "non_thinking"
+    return None
+
+
+def _reasons_by_default(model: str) -> bool:
+    """Whether avior classifies `model` as reasoning when no effort is
+    requested."""
+
+    mode = _reasoning_mode(model)
+    match mode:
+        case "on_by_default" | "always_on":
+            return True
+        case None | "off_by_default":
+            return False
+        case _:
+            assert_never(mode)
 
 
 def _rule_matches(model: str, prefix: str | None, variant: str | None) -> bool:
@@ -294,13 +326,11 @@ class OpenAIResponsesProvider(Provider):
         """Report what `model` supports.
 
         Reports `supports_thinking=True` for a recognized reasoning model - one
-        that `_reasoning_mode` maps to a mode other than `non_thinking` - and
-        the conservative default otherwise.
+        that `_reasoning_mode` maps to a mode - and the conservative default
+        otherwise.
         """
 
-        return ModelCapabilities(
-            supports_thinking=_reasoning_mode(model) != "non_thinking"
-        )
+        return ModelCapabilities(supports_thinking=_reasoning_mode(model) is not None)
 
     async def complete(
         self,
@@ -322,17 +352,22 @@ class OpenAIResponsesProvider(Provider):
         - `max_tokens` - sent as `max_output_tokens`, only when explicitly set
           on `settings`; otherwise the model's own default applies.
         - `temperature` - forwarded only when explicitly set on `settings`.
+          A value other than `1` is dropped, with an
+          `UnsupportedSettingRunWarning`, when reasoning is active for the
+          request - OpenAI rejects such a value.
         - `thinking` - the portable setting maps to a `reasoning` config chosen
           by the model's reasoning mode (see `_ReasoningMode`):
 
           - a level (`low` / `medium` / `high`) becomes `reasoning.effort`;
-          - `True` sends the default effort on an `optional` model and leaves an
-            `always` model's own default;
-          - `False` sends `reasoning.effort="none"` on an `optional` model.
+          - `True` sends the default effort on an `off_by_default` model and
+            leaves a model that already reasons by default at its own depth;
+          - `False` sends `reasoning.effort="none"` on an `off_by_default` or
+            `on_by_default` model.
 
           A request the model cannot honor is dropped, with an
           `UnsupportedSettingRunWarning` on the response: enabling reasoning on
-          a `non_thinking` model, or disabling it on an `always` model.
+          a model avior does not treat as reasoning, or disabling it on an
+          `always_on` model.
 
           `provider_options["openai"]` overrides this mapping; see
           `OpenAIProviderOptions`.
@@ -377,23 +412,21 @@ class OpenAIResponsesProvider(Provider):
         warnings: list[RunWarning] = []
         reasoning_param = self._resolve_reasoning(settings, warnings)
 
-        # `effort="none"` is the off-switch: a portable `thinking=False` on an
-        # `optional` model and a raw `effort="none"` option both resolve to it.
-        reasoning_enabled = (
-            isinstance(reasoning_param, dict)
-            and reasoning_param.get("effort") != "none"
+        # An explicit `effort` decides whether reasoning is active for the
+        # request: a level turns reasoning on; `"none"` turns it off.  Through
+        # a raw config in provider options, an effort can turn reasoning on
+        # even for a model avior does not recognize by name.  Without an
+        # explicit effort - the portable mapping produced no config, or a raw
+        # config carries no `effort` - the model's default, as avior
+        # classifies it, applies.  An encrypted reasoning item is requested
+        # and replayed only when reasoning is active.
+        effort = (
+            None if isinstance(reasoning_param, Omit) else reasoning_param.get("effort")
         )
-
-        # Reasoning is active when an `always` model reasons on its own, or a
-        # reasoning config other than `effort="none"` was sent.  A raw config
-        # via provider options can enable reasoning even on a model avior does
-        # not recognize by name.  An `always` model stays active regardless; for
-        # an `optional` model a portable `thinking=False` resolves to
-        # `effort="none"` and turns the round-trip off.  An encrypted reasoning
-        # item is requested and replayed only when reasoning is active.
-        reasoning_active = (
-            _reasoning_mode(settings.model) == "always" or reasoning_enabled
-        )
+        if effort is not None:
+            reasoning_active = effort != "none"
+        else:
+            reasoning_active = _reasons_by_default(settings.model)
 
         # A single avior message can expand to several Responses input items
         # (an assistant turn with tool calls becomes a `message` item plus one
@@ -411,8 +444,10 @@ class OpenAIResponsesProvider(Provider):
         instructions_param: str | Omit = (
             system_prompt if system_prompt is not None else omit
         )
-        temperature_param: float | Omit = (
-            settings.temperature if settings.temperature is not None else omit
+        temperature_param = self._resolve_temperature(
+            settings,
+            reasoning_active,
+            warnings,
         )
         max_output_tokens_param: int | Omit = (
             settings.max_tokens if settings.max_tokens is not None else omit
@@ -563,7 +598,7 @@ class OpenAIResponsesProvider(Provider):
             return omit
 
         mode = _reasoning_mode(settings.model)
-        if mode == "non_thinking":
+        if mode is None:
             # The model is not a recognized reasoning model.  A request to
             # enable (`True` / a level) is dropped and warned; the reason is
             # honest for both a model that genuinely does not reason (`gpt-4o`)
@@ -583,9 +618,9 @@ class OpenAIResponsesProvider(Provider):
 
         elif thinking is False:
             match mode:
-                case "optional":
+                case "off_by_default" | "on_by_default":
                     return Reasoning(effort="none")
-                case "always":
+                case "always_on":
                     # Reasoning cannot be turned off.
                     warnings.append(
                         self._thinking_dropped(
@@ -599,11 +634,11 @@ class OpenAIResponsesProvider(Provider):
 
         elif thinking is True:
             match mode:
-                case "optional":
-                    # An `optional` model does not reason by default, so
-                    # enabling it needs an explicit effort.
+                case "off_by_default":
+                    # An `off_by_default` model needs an explicit effort to
+                    # start reasoning.
                     return Reasoning(effort=_DEFAULT_EFFORT)
-                case "always":
+                case "on_by_default" | "always_on":
                     # The model already reasons at its own default depth.
                     return omit
                 case _:
@@ -611,6 +646,37 @@ class OpenAIResponsesProvider(Provider):
 
         else:
             return Reasoning(effort=thinking)
+
+    def _resolve_temperature(
+        self,
+        settings: ModelSettings,
+        reasoning_active: bool,
+        warnings: list[RunWarning],
+    ) -> float | Omit:
+        """Map `temperature`, dropping a value OpenAI would reject.
+
+        OpenAI rejects a `temperature` other than `_DEFAULT_TEMPERATURE` when
+        reasoning is active for the request (the `reasoning_active` argument).
+        Such a value is dropped with an `UnsupportedSettingRunWarning`; the
+        default `1` is forwarded and an unset value leaves the parameter unsent.
+        """
+
+        temperature = settings.temperature
+        if temperature is None:
+            return omit
+        if temperature == _DEFAULT_TEMPERATURE:
+            return temperature
+
+        if reasoning_active:
+            warnings.append(
+                self._sampling_dropped(
+                    settings,
+                    "a custom temperature is not accepted while reasoning is active",
+                )
+            )
+            return omit
+
+        return temperature
 
     def _thinking_dropped(
         self,
@@ -627,6 +693,21 @@ class OpenAIResponsesProvider(Provider):
         return UnsupportedSettingRunWarning(
             setting_name="thinking",
             setting_value=settings.thinking,
+            reason=reason,
+            provider=self.name,
+            model=settings.model,
+        )
+
+    def _sampling_dropped(
+        self,
+        settings: ModelSettings,
+        reason: str,
+    ) -> UnsupportedSettingRunWarning:
+        """Build the warning for a `temperature` that was dropped."""
+
+        return UnsupportedSettingRunWarning(
+            setting_name="temperature",
+            setting_value=settings.temperature,
             reason=reason,
             provider=self.name,
             model=settings.model,
@@ -782,6 +863,15 @@ class OpenAIResponsesProvider(Provider):
         into the `dict` that `ToolCallPart.args` expects (an empty string maps
         to `{}`).  `call_id` (not `id`) is kept so the matching tool result can
         be correlated back on the next request.
+
+        The item `id` is deliberately not kept, so `_to_wire` replays every
+        `function_call` without an id.  OpenAI checks that a reasoning item
+        precedes its tool calls only for items that carry an id; a replay
+        without ids therefore passes that check even when a tool call has no
+        reasoning item before it - `_to_reasoning_item_param` drops the item
+        for a turn from another provider, for a request whose reasoning is
+        off, or for a part with no token to echo.  The cost: OpenAI cannot
+        flag a broken pairing that avior itself produced.
         """
 
         try:
@@ -880,6 +970,9 @@ class OpenAIResponsesProvider(Provider):
                                 items.append(reasoning_item)
 
                         case ToolCallPart():
+                            # No item `id` is sent: `_to_tool_call_part` does
+                            # not keep the id, and its docstring explains why
+                            # that is deliberate.
                             items.append(
                                 ResponseFunctionToolCallParam(
                                     type="function_call",

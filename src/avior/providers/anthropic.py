@@ -99,9 +99,8 @@ type _ThinkingMode = Literal["adaptive", "always_on", "budget"]
 
 - `"adaptive"` - `thinking={"type": "adaptive"}`, with depth set through
   `output_config.effort`; turn it off with `{"type": "disabled"}`.
-- `"always_on"` - adaptive thinking that cannot be turned off (an explicit
-  `{"type": "disabled"}` is rejected), so a request to disable it is dropped and
-  the model keeps reasoning.
+- `"always_on"` - adaptive thinking that cannot be turned off, so a request to
+  disable it is dropped and the model keeps reasoning.
 - `"budget"` - legacy `thinking={"type": "enabled", "budget_tokens": N}`; the
   model accepts neither adaptive thinking nor `output_config.effort`.
 """
@@ -305,7 +304,7 @@ class AnthropicProvider(Provider):
         - `temperature` - forwarded only when explicitly set on `settings`.
           A value other than `1` is dropped, with an
           `UnsupportedSettingRunWarning`, when the model does not accept a
-          custom `temperature`, or when thinking is active in the request -
+          custom `temperature`, or when thinking is active for the request -
           Anthropic rejects such a value in either case.
         - `thinking` - the portable setting maps to the chosen model's native
           config: an adaptive model to `{"type": "adaptive"}` with an
@@ -683,7 +682,7 @@ class AnthropicProvider(Provider):
         thinking_param: ThinkingConfigParam | Omit,
         warnings: list[RunWarning],
     ) -> float | Omit:
-        """Map `temperature` to the request, dropping a rejected value.
+        """Map `temperature`, dropping a value Anthropic would reject.
 
         Anthropic rejects a `temperature` other than `_DEFAULT_TEMPERATURE`
         in two cases:
@@ -694,7 +693,8 @@ class AnthropicProvider(Provider):
           always reasons.
 
         Such a value is dropped with an `UnsupportedSettingRunWarning`; the
-        default and an unset value pass through unchanged.
+        default `1` is forwarded and an unset value leaves the parameter
+        unsent.
         """
 
         temperature = settings.temperature

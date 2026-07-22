@@ -18,6 +18,7 @@ from avior.core.messages import (
     AssistantMessage,
     ThinkingPart,
     ToolCallPart,
+    ToolMessage,
     UserMessage,
 )
 from avior.core.tools import Tool
@@ -34,11 +35,13 @@ _MODEL = "gpt-4.1-nano"
 # before their tool calls on the continuation request.
 _REASONING_MODEL = "o4-mini"
 
-# A model whose reasoning is optional: off by default and with
-# `reasoning.effort="none"`, turned on with an effort level.  The portable
-# `thinking=True` enables it and `thinking=False` disables it (on the
-# always-on o-series, `True` is a no-op and `False` is refused).
-_OPTIONAL_MODEL = "gpt-5.1"
+# A model whose reasoning is off by default: an effort level turns reasoning
+# on; `reasoning.effort="none"` keeps it off.
+_OFF_BY_DEFAULT_MODEL = "gpt-5.1"
+
+# A model whose reasoning is on by default: `reasoning.effort="none"` turns
+# reasoning off.
+_ON_BY_DEFAULT_MODEL = "gpt-5.5"
 
 
 class _MagicNumberArgs(BaseModel):
@@ -203,20 +206,25 @@ async def test_runner_run_reasoning_tool_chain_against_openai(
 
 
 @pytest.mark.parametrize("thinking", [True, "high"])
-async def test_complete_enables_reasoning_on_optional_model_against_openai(
+async def test_complete_enables_reasoning_on_off_by_default_model_against_openai(
     thinking: bool | Literal["low", "medium", "high"],
     openai_responses_provider: OpenAIResponsesProvider,
 ) -> None:
-    """A truthy portable `thinking` turns reasoning on an `optional` model.
+    """`thinking=True` or a level enables `off_by_default` reasoning.
 
-    An `optional` model does not reason by default, so a truthy `thinking` must
-    send an explicit `reasoning.effort` (`True` -> a default effort, a level ->
-    that effort); the assistant turn then carries a `ThinkingPart`, proving
-    reasoning was actually enabled (not left at the off default).
+    An `off_by_default` model does not reason on its own, so `True` or a
+    level must send an explicit `reasoning.effort` (`True` -> a default
+    effort, a level -> that effort); the assistant turn then carries a
+    `ThinkingPart`, proving reasoning was actually enabled (not left at the
+    off default).
     """
 
-    # GIVEN settings that enable reasoning through the portable knob
-    settings = ModelSettings(model=_OPTIONAL_MODEL, thinking=thinking, max_tokens=2048)
+    # GIVEN settings that enable reasoning through the portable setting
+    settings = ModelSettings(
+        model=_OFF_BY_DEFAULT_MODEL,
+        thinking=thinking,
+        max_tokens=2048,
+    )
 
     # WHEN `complete` is awaited on a prompt that needs reasoning
     result = await openai_responses_provider.complete(
@@ -224,7 +232,7 @@ async def test_complete_enables_reasoning_on_optional_model_against_openai(
         settings,
     )
 
-    # THEN the model reasoned and no warning was raised
+    # THEN the model reasoned and no warning was recorded
     thinking_parts = [p for p in result.message.parts if isinstance(p, ThinkingPart)]
     assert thinking_parts
     assert result.warnings == []
@@ -235,13 +243,21 @@ async def test_complete_disables_reasoning_against_openai(
 ) -> None:
     """The portable `thinking=False` turns reasoning off on a capable model.
 
-    Sending `thinking=False` maps to `reasoning.effort="none"`; the call must be
-    accepted (no 400), raise no warning, and the assistant turn must carry no
-    `ThinkingPart`, proving the model did not reason.
+    On an `on_by_default` model - one that reasons when left alone - sending
+    `thinking=False` maps to `reasoning.effort="none"`.  The call must be
+    accepted (no 400), record no warning, and the assistant turn must carry no
+    `ThinkingPart`, proving the model did not reason.  A custom `temperature`
+    is sent alongside: with reasoning off, OpenAI accepts it.
     """
 
-    # GIVEN settings that disable reasoning through the portable setting
-    settings = ModelSettings(model=_OPTIONAL_MODEL, thinking=False, max_tokens=2048)
+    # GIVEN settings that disable reasoning on an `on_by_default` model and
+    # carry a custom temperature
+    settings = ModelSettings(
+        model=_ON_BY_DEFAULT_MODEL,
+        thinking=False,
+        temperature=0.3,
+        max_tokens=2048,
+    )
 
     # WHEN `complete` is awaited on a prompt that would otherwise reason
     result = await openai_responses_provider.complete(
@@ -249,10 +265,177 @@ async def test_complete_disables_reasoning_against_openai(
         settings,
     )
 
-    # THEN the model did not reason and no warning was raised
+    # THEN the model did not reason, and no warning was recorded - a dropped
+    # temperature would have recorded one, so the temperature was forwarded
+    # and OpenAI accepted the request carrying it
     thinking_parts = [p for p in result.message.parts if isinstance(p, ThinkingPart)]
     assert thinking_parts == []
     assert result.warnings == []
+
+
+@pytest.mark.parametrize(
+    ("model", "reasons_by_default"),
+    [
+        (_MODEL, False),
+        (_OFF_BY_DEFAULT_MODEL, False),
+        (_ON_BY_DEFAULT_MODEL, True),
+        (_REASONING_MODEL, True),
+    ],
+    ids=["non-thinking", "off-by-default", "on-by-default", "always-on"],
+)
+async def test_complete_default_reasoning_matches_classification_against_openai(
+    model: str,
+    reasons_by_default: bool,
+    openai_responses_provider: OpenAIResponsesProvider,
+) -> None:
+    """With `thinking` unset, each model shows its classified default behavior.
+
+    avior's per-model reasoning modes assert which models reason when no
+    reasoning config is sent; temperature dropping and reasoning replay
+    depend on that classification.  This test pins one model per mode against
+    the live API: a drifted default shows up as a `ThinkingPart` mismatch.
+    """
+
+    # GIVEN settings with `thinking` unset
+    settings = ModelSettings(model=model, max_tokens=4096)
+
+    # WHEN `complete` is awaited on a prompt that invites reasoning
+    result = await openai_responses_provider.complete(
+        [UserMessage.from_text("What is 17 * 23?  Reason step by step.")],
+        settings,
+    )
+
+    # THEN a thinking part is present exactly when the model reasons by default
+    thinking_parts = [p for p in result.message.parts if isinstance(p, ThinkingPart)]
+    assert bool(thinking_parts) == reasons_by_default
+    assert result.warnings == []
+
+
+async def test_complete_drops_temperature_with_reasoning_against_openai(
+    openai_responses_provider: OpenAIResponsesProvider,
+) -> None:
+    """avior drops a `temperature` that reasoning makes invalid, avoiding a 400.
+
+    OpenAI rejects a non-default `temperature` while reasoning is active, and
+    returns a 400.  With reasoning on and a custom temperature, avior drops the
+    temperature before sending, so the call succeeds and records the drop as a
+    warning.
+    """
+
+    # GIVEN settings with reasoning on and a temperature OpenAI would reject
+    settings = ModelSettings(
+        model=_OFF_BY_DEFAULT_MODEL, thinking="low", temperature=0.5
+    )
+
+    # WHEN `complete` is awaited
+    result = await openai_responses_provider.complete(
+        [UserMessage.from_text("What is 2 + 2?")],
+        settings,
+    )
+
+    # THEN the call succeeded (no 400) and a temperature warning was recorded
+    temperature_warnings = [
+        w for w in result.warnings if w.setting_name == "temperature"
+    ]
+    assert len(temperature_warnings) == 1
+
+
+async def test_complete_accepts_temperature_with_summary_only_config_against_openai(
+    openai_responses_provider: OpenAIResponsesProvider,
+) -> None:
+    """A summary-only raw config leaves reasoning off and `temperature` sent.
+
+    A raw reasoning config that carries only a `summary` sets no effort, so an
+    `off_by_default` model stays at its default of not reasoning.  OpenAI must
+    accept the request with the custom `temperature` (no 400), and the
+    response must carry no `ThinkingPart` and no warning.
+    """
+
+    # GIVEN settings with an `off_by_default` model, a custom temperature, and
+    # a raw reasoning config that carries only a summary
+    settings = ModelSettings(
+        model=_OFF_BY_DEFAULT_MODEL,
+        temperature=0.3,
+        max_tokens=2048,
+        provider_options={"openai": {"reasoning": {"summary": "auto"}}},
+    )
+
+    # WHEN `complete` is awaited
+    result = await openai_responses_provider.complete(
+        [UserMessage.from_text("What is 17 * 23?")],
+        settings,
+    )
+
+    # THEN the call succeeded, the model did not reason, and no warning was
+    # recorded - a dropped temperature would have recorded one, so the
+    # temperature was forwarded and OpenAI accepted the request carrying it
+    thinking_parts = [p for p in result.message.parts if isinstance(p, ThinkingPart)]
+    assert thinking_parts == []
+    assert result.warnings == []
+
+
+async def test_complete_accepts_reasoning_transcript_without_reasoning_against_openai(
+    openai_responses_provider: OpenAIResponsesProvider,
+) -> None:
+    """A reasoning-run transcript replays into a reasoning-off request.
+
+    With reasoning off, the adapter drops the transcript's reasoning items but
+    keeps their tool calls, so the request carries a `function_call` without
+    the reasoning item that preceded it.  OpenAI accepts that shape only when
+    the `function_call` carries no item id, so this test fails if avior starts
+    sending item ids.
+    """
+
+    # GIVEN a transcript from a reasoning run whose turn pairs a reasoning
+    # item with a tool call
+    tool = _MagicNumber()
+    agent = Agent(
+        instructions=(
+            "When asked for a city's magic number, you must call the "
+            "get_magic_number tool, then state the number it returns."
+        ),
+        model_settings=ModelSettings(
+            model=_OFF_BY_DEFAULT_MODEL, thinking="high", max_tokens=4096
+        ),
+        tools=[tool],
+    )
+    reasoning_run = await Runner(provider=openai_responses_provider).run(
+        agent, "What is the magic number for Paris?"
+    )
+    # The transcript is cut after the tool turn: the magic number then exists
+    # only in the replayed call/result pair, so the continuation cannot answer
+    # from a later assistant message instead
+    last_tool_index = max(
+        index
+        for index, message in enumerate(reasoning_run.messages)
+        if isinstance(message, ToolMessage)
+    )
+    transcript = reasoning_run.messages[: last_tool_index + 1]
+    paired_turns = [
+        message
+        for message in transcript
+        if isinstance(message, AssistantMessage)
+        and any(isinstance(p, ThinkingPart) for p in message.parts)
+        and any(isinstance(p, ToolCallPart) for p in message.parts)
+    ]
+    assert paired_turns, "precondition: the run must pair reasoning with a tool call"
+
+    # AND settings that disable reasoning for the continuation
+    settings = ModelSettings(
+        model=_OFF_BY_DEFAULT_MODEL, thinking=False, max_tokens=2048
+    )
+
+    # WHEN `complete` is awaited on the transcript plus a follow-up user
+    # message
+    result = await openai_responses_provider.complete(
+        [*transcript, UserMessage.from_text("Repeat the magic number.")],
+        settings,
+    )
+
+    # THEN the request is accepted and answered from the replayed transcript
+    text = result.message.text
+    assert text
+    assert "4242" in text
 
 
 async def test_complete_returns_reasoning_summary_against_openai(
