@@ -125,7 +125,9 @@ them does not support thinking.
 
 
 def _thinking_mode(model: str) -> _ThinkingMode | None:
-    """Return how `model` accepts thinking, or `None` if it does not support it.
+    """Return how `model` accepts thinking, or `None` if avior does not treat
+    it as thinking: either a known non-thinking model or one it does not
+    recognize.
 
     Matches by model-id prefix, so a dated snapshot resolves to its family's
     mode.

@@ -6,10 +6,13 @@ Wraps `google.genai.Client` and implements `Provider` against the Gemini API
 Install via the optional extra: `pip install avior[gemini]`.
 """
 
+import base64
 import logging
 import uuid
 from collections.abc import Callable, Sequence
-from typing import Any, assert_never
+from typing import Any, Literal, TypedDict, assert_never
+
+from pydantic import ConfigDict, JsonValue, TypeAdapter
 
 try:
     import httpx
@@ -22,6 +25,7 @@ except ImportError as e:
     ) from e
 
 from avior.core.exceptions import (
+    AviorUsageError,
     ProviderConnectionError,
     ProviderHTTPError,
     ProviderResponseValidationError,
@@ -37,11 +41,199 @@ from avior.core.messages import (
     ToolMessage,
     UserMessage,
 )
-from avior.core.provider import ModelSettings, Provider, ProviderResponse
+from avior.core.provider import (
+    ModelCapabilities,
+    ModelSettings,
+    Provider,
+    ProviderResponse,
+    resolve_provider_options,
+)
 from avior.core.tools import Tool
 from avior.core.usage import Usage
+from avior.core.warnings import RunWarning, UnsupportedSettingRunWarning
 
 logger = logging.getLogger(__name__)
+
+
+type _ThinkingShape = Literal["budget", "level"]
+"""Which dialect of `thinking_config` a model speaks.
+
+- `"budget"` - thinking depth is a token count in `thinking_budget`; `0`
+  turns thinking off and `-1` asks for a model-chosen dynamic depth (the
+  Gemini 2.5 generation).  The model rejects `thinking_level`.
+- `"level"` - thinking depth is a named level in `thinking_level`; `MINIMAL`
+  is the lowest (the Gemini 3 generations).
+"""
+
+type _ThinkingMode = Literal["off_by_default", "on_by_default", "always_on"]
+"""How a model treats thinking.
+
+- `"off_by_default"` - the model does not think unless the config turns
+  thinking on.
+- `"on_by_default"` - the model thinks unless the config turns thinking off.
+- `"always_on"` - the model thinks on every response and cannot be turned off,
+  so a request to disable it is dropped and the model keeps thinking.
+
+Which config values turn thinking on or off is the other axis: the model's
+`_ThinkingShape`.
+"""
+
+_THINKING_MODELS: dict[str, tuple[_ThinkingShape, _ThinkingMode]] = {
+    "gemini-2.5-flash": ("budget", "on_by_default"),
+    "gemini-2.5-flash-lite": ("budget", "off_by_default"),
+    "gemini-2.5-pro": ("budget", "always_on"),
+    "gemini-3-flash": ("level", "on_by_default"),
+    "gemini-3-pro": ("level", "always_on"),
+    "gemini-3.1-flash-lite": ("level", "off_by_default"),
+    "gemini-3.1-pro": ("level", "always_on"),
+    "gemini-3.5-flash": ("level", "on_by_default"),
+    "gemini-3.5-flash-lite": ("level", "off_by_default"),
+    "gemini-3.6-flash": ("level", "on_by_default"),
+    # Moving aliases for the newest flash / flash-lite / pro model.
+    # Hand-maintained: re-check the classification when Google repoints an
+    # alias at a new generation.
+    "gemini-flash-latest": ("level", "on_by_default"),
+    "gemini-flash-lite-latest": ("level", "off_by_default"),
+    "gemini-pro-latest": ("level", "always_on"),
+}
+"""Config shape and thinking mode per model, keyed by model-id family.
+
+A model matches a family when its id is the family itself or the family plus
+a version tail (see `_matches_family`), so `gemini-3-flash-preview` and
+`gemini-2.5-flash-preview-05-20` resolve to their families while a named
+variant with its own behavior (`gemini-2.5-flash-image`,
+`gemini-2.5-flash-preview-tts`) matches nothing and is not treated as a
+thinking model.  The families are disjoint under that matching, so match
+order does not matter.
+
+The classifications are seeded from probing the live Gemini API.
+"""
+
+
+def _thinking_support(model: str) -> tuple[_ThinkingShape, _ThinkingMode] | None:
+    """Return how `model` supports thinking - its config shape and thinking
+    mode - or `None` if avior does not treat it as thinking: either a known
+    non-thinking model or one it does not recognize.
+    """
+
+    # The Gemini SDK also accepts a model's fully-qualified resource name
+    # (`models/gemini-2.5-flash`); classify it like the bare id.  A
+    # `tunedModels/...` resource stays unrecognized: a fine-tune carries a
+    # user-chosen name that says nothing about the base model.
+    model = model.removeprefix("models/")
+
+    for family, support in _THINKING_MODELS.items():
+        if _matches_family(model, family):
+            return support
+
+    return None
+
+
+def _matches_family(model: str, family: str) -> bool:
+    """Whether `model` is `family` itself or `family` plus a version tail.
+
+    A version tail is one or more hyphen-separated segments, each either all
+    digits, `preview`, or `latest` - so `gemini-2.5-flash-preview-05-20`
+    matches the family `gemini-2.5-flash`, while `gemini-2.5-flash-image`
+    does not: `image` names a different model, not a version of the family.
+    """
+
+    if model == family:
+        return True
+    if not model.startswith(family + "-"):
+        return False
+
+    tail = model[len(family) + 1 :]
+    return all(
+        segment.isdigit() or segment in ("preview", "latest")
+        for segment in tail.split("-")
+    )
+
+
+_THINKING_BUDGET_TOKENS: dict[Literal["low", "medium", "high"], int] = {
+    "low": 2048,
+    "medium": 8192,
+    "high": 24576,
+}
+"""`thinking_budget` for each portable thinking level on a budget-shape model.
+
+The values fit the `thinking_budget` range of every budget-shape model;
+`high` is the largest budget the 2.5-flash family accepts.
+"""
+
+_THINKING_LEVELS: dict[Literal["low", "medium", "high"], types.ThinkingLevel] = {
+    "low": types.ThinkingLevel.LOW,
+    "medium": types.ThinkingLevel.MEDIUM,
+    "high": types.ThinkingLevel.HIGH,
+}
+"""`thinking_level` for each portable thinking level on a level-shape model."""
+
+_DEFAULT_LEVEL = types.ThinkingLevel.MEDIUM
+"""The level that `thinking=True` selects on an `off_by_default` level-shape
+model.
+
+An `off_by_default` model needs an explicit config to start thinking.
+`MEDIUM` is a moderate default: a middle level, so `thinking=True` turns
+thinking on without committing to the lightest or deepest setting.  A
+budget-shape model does not need this constant: its dialect has a native
+"model-chosen depth" value, `thinking_budget=-1`.
+"""
+
+_SKIP_SIGNATURE_VALIDATOR = b"skip_thought_signature_validator"
+"""Placeholder `thought_signature` accepted by the Gemini API in place of a
+real one.
+
+Thinking Gemini models attach an opaque `thought_signature` - an encrypted
+snapshot of the model's reasoning state - to parts they emit, and the Gemini 3
+generations validate replay: a model turn whose first `function_call` part
+carries no signature is rejected.  This placeholder is Google's documented
+escape hatch - it tells the Gemini API to skip signature validation for the
+part.  avior stamps it on a model turn's first `function_call` part when
+that part carries no signature to echo, which happens when:
+
+- the turn was produced by another provider, so no Gemini signature exists;
+- the turn was built by hand (`provider_name` is `None`);
+- the turn was produced by a Gemini model that does not sign - for example a
+  Gemini 2.5 model with thinking disabled;
+- the turn was produced by a signing Gemini model but avior lost the signature -
+  a round-trip bug.  The placeholder masks such a bug as silent quality
+  degradation instead of a loud rejection, so the signature round-trip is
+  guarded by avior's own tests rather than left to the Gemini API's check.
+
+The first three are legitimate and expected; they are what keeps a
+hand-built, cross-provider, or non-signing Gemini transcript replayable on a
+validating model.
+"""
+
+
+class GeminiProviderOptions(TypedDict, total=False):
+    """Gemini-specific `provider_options["gemini"]` settings.
+
+    A raw Gemini thinking config, for control that the portable
+    `ModelSettings.thinking` setting does not reach.  It takes precedence over
+    that portable setting.  Unknown keys are rejected when the slice is
+    validated.
+    """
+
+    # Forbid unknown keys when validating the slice.  The type-checker ignore
+    # comments are needed because a `TypedDict` body normally holds only field
+    # annotations, not this assignment.
+    __pydantic_config__ = ConfigDict(  # type: ignore[misc]  # pyright: ignore
+        extra="forbid"
+    )
+
+    thinking_config: types.ThinkingConfigDict
+    """A raw Gemini thinking config, passed through in place of the portable
+    setting.  It bypasses the portable mapping, so it still drives thinking on
+    a model avior does not yet classify, and reaches settings the portable
+    setting does not - notably `include_thoughts`, to return thought summaries.
+    avior validates its shape against the installed Gemini SDK types before
+    sending, so it must match that version's config, not a newer one.
+    """
+
+
+_GEMINI_OPTIONS_ADAPTER = TypeAdapter(GeminiProviderOptions)
+"""`TypeAdapter` for the `provider_options["gemini"]` slice."""
 
 
 class GeminiProvider(Provider):
@@ -61,14 +253,6 @@ class GeminiProvider(Provider):
     Exceptions from the Gemini SDK are translated to avior's provider-agnostic
     hierarchy (`ProviderError` and subclasses), with the original exception
     preserved as `__cause__`.
-
-    Known limitation - thought signatures: thinking-enabled Gemini models (e.g.
-    `gemini-2.5-flash`) attach a `thought_signature` to function-call parts that
-    the API expects sent back unchanged on the next request, especially for
-    multi-step tool use.  The canonical IR has no slot for it yet, so the
-    signature is dropped on the round trip.  A single tool round-trip (one call,
-    its result, then a final answer) still works, but a chain of several tool
-    calls across requests on these models may be rejected.
     """
 
     def __init__(
@@ -103,6 +287,16 @@ class GeminiProvider(Provider):
 
         return "gemini"
 
+    def model_capabilities(self, model: str) -> ModelCapabilities:
+        """Report what `model` supports.
+
+        Reports `supports_thinking=True` for a recognized thinking model - one
+        that `_thinking_support` classifies - and the conservative default
+        otherwise.
+        """
+
+        return ModelCapabilities(supports_thinking=_thinking_support(model) is not None)
+
     async def complete(
         self,
         messages: Sequence[Message],
@@ -113,8 +307,34 @@ class GeminiProvider(Provider):
     ) -> ProviderResponse:
         """Send the conversation to Gemini and return the response.
 
-        `temperature` and `max_output_tokens` are forwarded only when
-        explicitly set on `settings`.
+        The portable `settings` map to Gemini's request as follows:
+
+        - `temperature` and `max_output_tokens` - forwarded only when explicitly
+          set on `settings`.  Gemini accepts a custom `temperature` with
+          thinking active, so none is dropped.
+        - `thinking` - the portable setting maps to the chosen model's native
+          `thinking_config`:
+
+          - a level (`low` / `medium` / `high`) becomes a `thinking_budget`
+            token count on a Gemini 2.5 model and a `thinking_level` on a
+            Gemini 3 or newer model;
+          - `True` sends an enabling config on an `off_by_default` model - a
+            model-chosen depth (Gemini 2.5) or the default `medium` level
+            (Gemini 3 and newer) - and leaves a model that already thinks by
+            default at its own depth;
+          - `False` turns thinking off on an `off_by_default` or
+            `on_by_default` model: `thinking_budget=0` on a Gemini 2.5 model,
+            `thinking_level=MINIMAL` - the dialect's lowest setting - on a
+            Gemini 3 or newer model.
+
+          Thought summaries are not requested; ask for them with
+          `include_thoughts` in the raw config.  A request the model cannot
+          honor is dropped, with an `UnsupportedSettingRunWarning` on the
+          response: enabling thinking on a model avior does not treat as
+          thinking, or disabling it on an `always_on` model.
+
+          `provider_options["gemini"]` overrides this mapping; see
+          `GeminiProviderOptions`.
 
         Args:
             messages: Conversation transcript (user / assistant / tool turns).
@@ -132,6 +352,10 @@ class GeminiProvider(Provider):
             the call metadata.
 
         Raises:
+            AviorUsageError: The `gemini` `provider_options` slice is invalid
+                (an unknown key or a value of the wrong type), or a transcript
+                part carries a corrupted `thought_signature`; raised before
+                the request is sent.
             ProviderHTTPError: The provider returned a 4xx or 5xx HTTP response.
                 `status_code` carries the wire status.
             ProviderResponseValidationError: The provider returned a successful
@@ -162,7 +386,11 @@ class GeminiProvider(Provider):
             for part in message.parts
             if isinstance(part, ToolCallPart)
         }
-        wire_messages = [self._to_wire(m, call_names) for m in messages]
+        wire_messages = [
+            wire_message
+            for m in messages
+            if (wire_message := self._to_wire(m, call_names)) is not None
+        ]
 
         # The Gemini SDK types its `tools` field as an invariant
         # `list[Tool | Callable]`; a mutable `list[Tool]` is not assignable to
@@ -178,11 +406,14 @@ class GeminiProvider(Provider):
             if tools
             else None
         )
+        warnings: list[RunWarning] = []
+        thinking_config = self._resolve_thinking(settings, warnings)
         config = types.GenerateContentConfig(
             system_instruction=system_prompt,
             max_output_tokens=settings.max_tokens,
             temperature=settings.temperature,
             tools=tools_param,
+            thinking_config=thinking_config,
         )
 
         try:
@@ -224,13 +455,33 @@ class GeminiProvider(Provider):
             seen_call_ids: set[str] = set(call_names)
 
             for part in candidate.content.parts or []:
-                # Thought summaries (only present when thinking is configured to
-                # include them) are not the answer; skip them from the text.
-                if part.thought:
-                    continue
+                # A thinking model attaches an opaque `thought_signature` to
+                # parts it may later validate on replay.  It is `bytes` in the
+                # Gemini SDK while `provider_details` holds only JSON values,
+                # so it is stored base64-encoded and decoded back on echo.
+                provider_details: dict[str, JsonValue] | None = None
+                if part.thought_signature:
+                    provider_details = {
+                        "thought_signature": base64.b64encode(
+                            part.thought_signature
+                        ).decode("ascii")
+                    }
 
-                if part.text is not None:
-                    parts.append(TextPart(text=part.text))
+                if part.thought:
+                    # A thought summary is a reasoning step, not the answer.
+                    # Summaries are only present when the config requests them
+                    # via `include_thoughts`.
+                    parts.append(
+                        ThinkingPart(
+                            content=part.text or "",
+                            provider_details=provider_details,
+                        )
+                    )
+
+                elif part.text is not None:
+                    parts.append(
+                        TextPart(text=part.text, provider_details=provider_details)
+                    )
 
                 elif part.function_call is not None:
                     call = part.function_call
@@ -252,6 +503,7 @@ class GeminiProvider(Provider):
                             call_id=call_id,
                             tool_name=call.name,
                             args=call.args or {},
+                            provider_details=provider_details,
                         )
                     )
 
@@ -315,6 +567,7 @@ class GeminiProvider(Provider):
             response_id=response.response_id,
             model=response.model_version,
             provider_name=self.name,
+            warnings=warnings,
         )
 
     async def aclose(self) -> None:
@@ -480,6 +733,147 @@ class GeminiProvider(Provider):
                 # mapping instead of silently bucketing as `"error"`.
                 assert_never(finish_reason)
 
+    def _resolve_thinking(
+        self,
+        settings: ModelSettings,
+        warnings: list[RunWarning],
+    ) -> types.ThinkingConfig | None:
+        """Map the thinking settings to Gemini's native config.
+
+        Returns the `thinking_config` config field, or `None` when none should
+        be sent.
+
+        The raw `gemini` provider options take precedence over the portable
+        `thinking` setting; `GeminiProviderOptions` documents how they combine.
+        Without them, the portable setting maps to the model's native shape -
+        see `_portable_thinking`.
+        """
+
+        options = resolve_provider_options(
+            settings,
+            self.name,
+            _GEMINI_OPTIONS_ADAPTER,
+        )
+        raw_config = options.get("thinking_config")
+        if raw_config is not None:
+            return types.ThinkingConfig.model_validate(raw_config)
+        else:
+            return self._portable_thinking(settings, warnings)
+
+    def _portable_thinking(
+        self,
+        settings: ModelSettings,
+        warnings: list[RunWarning],
+    ) -> types.ThinkingConfig | None:
+        """Map the portable `thinking` level to a native config for `settings`.
+
+        Returns the `thinking_config` field (or `None`), appending an
+        `UnsupportedSettingRunWarning` when a request is dropped.  `complete`
+        documents the mapping and the drop conditions.
+        """
+
+        thinking = settings.thinking
+        if thinking is None:
+            return None
+
+        support = _thinking_support(settings.model)
+        if support is None:
+            # The model is not a recognized thinking model.  A request to
+            # enable (`True` / a level) is dropped and warned; the reason is
+            # honest for both a model that genuinely does not think and one
+            # avior does not recognize, pointing to the `gemini` provider
+            # options rather than claiming the model cannot think.  Disabling
+            # (`False`) is a harmless no-op.
+            if thinking is not False:
+                warnings.append(
+                    self._thinking_dropped(
+                        settings,
+                        "the model is not a recognized thinking model; if it "
+                        "does think, configure thinking via the `gemini` "
+                        "provider options",
+                    )
+                )
+            return None
+
+        shape, mode = support
+        if thinking is False:
+            match mode:
+                case "off_by_default" | "on_by_default":
+                    match shape:
+                        case "budget":
+                            return types.ThinkingConfig(thinking_budget=0)
+                        case "level":
+                            # The level dialect has no full off; `MINIMAL` is
+                            # its lowest setting.
+                            return types.ThinkingConfig(
+                                thinking_level=types.ThinkingLevel.MINIMAL
+                            )
+                        case _:
+                            assert_never(shape)
+                case "always_on":
+                    warnings.append(
+                        self._thinking_dropped(
+                            settings,
+                            "the model's thinking is always on and cannot be disabled",
+                        )
+                    )
+                    return None
+                case _:
+                    assert_never(mode)
+
+        elif thinking is True:
+            match mode:
+                case "off_by_default":
+                    # An `off_by_default` model needs an explicit config to
+                    # start thinking.  The budget dialect has a native
+                    # model-chosen depth (`-1`); the level dialect does not,
+                    # so a moderate default level stands in.
+                    match shape:
+                        case "budget":
+                            return types.ThinkingConfig(thinking_budget=-1)
+                        case "level":
+                            return types.ThinkingConfig(thinking_level=_DEFAULT_LEVEL)
+                        case _:
+                            assert_never(shape)
+                case "on_by_default" | "always_on":
+                    # The model already thinks at its own default depth.
+                    return None
+                case _:
+                    assert_never(mode)
+
+        else:
+            match shape:
+                case "budget":
+                    return types.ThinkingConfig(
+                        thinking_budget=_THINKING_BUDGET_TOKENS[thinking]
+                    )
+                case "level":
+                    return types.ThinkingConfig(
+                        thinking_level=_THINKING_LEVELS[thinking]
+                    )
+                case _:
+                    assert_never(shape)
+
+    def _thinking_dropped(
+        self,
+        settings: ModelSettings,
+        reason: str | None = None,
+    ) -> UnsupportedSettingRunWarning:
+        """Build the warning for a `thinking` request that was dropped.
+
+        `reason` is an optional standalone explanation of why the request could
+        not be honored; it is `None` when the generic message already says
+        enough.
+        """
+
+        return UnsupportedSettingRunWarning(
+            setting_name="thinking",
+            setting_value=settings.thinking,
+            reason=reason,
+            provider=self.name,
+            model=settings.model,
+        )
+
     @staticmethod
     def _to_function_declaration(
         tool: Tool[Any, Any, Any],
@@ -504,15 +898,26 @@ class GeminiProvider(Provider):
             parameters_json_schema=tool.args_model.model_json_schema(),
         )
 
-    @staticmethod
-    def _to_wire(message: Message, call_names: dict[str, str]) -> types.Content:
-        """Convert an avior `Message` to a Gemini `Content`.
+    def _to_wire(
+        self,
+        message: Message,
+        call_names: dict[str, str],
+    ) -> types.Content | None:
+        """Convert an avior `Message` to a Gemini `Content`, or `None`.
 
         Maps each message type to Gemini's wire shape:
 
         - `UserMessage` -> a `"user"` turn of text parts.
-        - `AssistantMessage` -> a `"model"` turn; text parts become text parts
-          and tool calls become `function_call` parts.
+        - `AssistantMessage` -> a `"model"` turn; text parts become text parts,
+          tool calls become `function_call` parts, and a reasoning step whose
+          `provider_details` carry a thought signature becomes a thought part.
+          Each part's signature is echoed back unchanged when this provider
+          produced the turn, and dropped otherwise - see `_signature_bytes`.
+          A turn's first `function_call` part is stamped with
+          `_SKIP_SIGNATURE_VALIDATOR` when it carries no signature to echo,
+          so a turn that legitimately has none still passes the Gemini API's
+          replay validation; later `function_call` parts are accepted
+          unsigned.
         - `ToolMessage` -> a `"user"` turn of `function_response` parts (Gemini
           carries tool results in the user role).
 
@@ -525,6 +930,11 @@ class GeminiProvider(Provider):
           makes the request invalid.  Gemini rejects it with an HTTP 400 that
           surfaces as `ProviderHTTPError` - the same outcome the other
           adapters produce for an orphaned tool result.
+
+        Returns `None` for an assistant turn whose parts all drop out (only
+        reasoning steps, none of them echoable): it would serialize to an empty
+        turn, which carries nothing for the model, so it is omitted from the
+        request.
         """
 
         match message:
@@ -536,28 +946,57 @@ class GeminiProvider(Provider):
 
             case AssistantMessage():
                 asst_parts: list[types.Part] = []
+                first_function_call = True
                 for part in message.parts:
+                    signature = self._signature_bytes(message, part)
                     match part:
                         case TextPart():
-                            asst_parts.append(types.Part(text=part.text))
+                            asst_parts.append(
+                                types.Part(
+                                    text=part.text,
+                                    thought_signature=signature,
+                                )
+                            )
                         case ToolCallPart():
+                            if signature is None and first_function_call:
+                                logger.debug(
+                                    "Stamping the signature-skip placeholder "
+                                    "on function call %s (turn provider: %s).",
+                                    part.call_id,
+                                    message.provider_name,
+                                )
+                                signature = _SKIP_SIGNATURE_VALIDATOR
+                            first_function_call = False
                             asst_parts.append(
                                 types.Part(
                                     function_call=types.FunctionCall(
                                         id=part.call_id,
                                         name=part.tool_name,
                                         args=part.args,
-                                    )
+                                    ),
+                                    thought_signature=signature,
                                 )
                             )
                         case ThinkingPart():
-                            # Thought parts are not decoded or echoed, so skip
-                            # them.  This is also correct for a thought from a
-                            # different provider, whose opaque token must never
-                            # be sent to Gemini.
-                            continue
+                            # A reasoning step is echoed only for its
+                            # signature; one with no signature to echo carries
+                            # nothing the Gemini API needs back, so it is
+                            # dropped.
+                            if signature is not None:
+                                asst_parts.append(
+                                    types.Part(
+                                        text=part.content,
+                                        thought=True,
+                                        thought_signature=signature,
+                                    )
+                                )
                         case _:
                             assert_never(part)
+
+                # A turn left empty after dropping non-echoable reasoning
+                # steps carries nothing to send; omit it.
+                if not asst_parts:
+                    return None
 
                 return types.Content(role="model", parts=asst_parts)
 
@@ -596,3 +1035,49 @@ class GeminiProvider(Provider):
 
             case _:
                 assert_never(message)
+
+    def _signature_bytes(
+        self,
+        message: AssistantMessage,
+        part: AssistantPart,
+    ) -> bytes | None:
+        """Return the thought signature to echo for `part`, or `None`.
+
+        A thought signature round-trips only to the provider that produced
+        it: the token is provider-specific, and the Gemini API verifies it on
+        replay.  Returns `None` - dropping the signature - when the turn came
+        from a different provider, or the part carries no signature.
+
+        `provider_details` stores the signature as base64 text; this decodes
+        it back to the `bytes` the Gemini SDK expects.
+
+        Raises:
+            AviorUsageError: The stored signature is not valid base64 text -
+                the transcript was corrupted after the signature was stored.
+        """
+
+        if message.provider_name != self.name:
+            return None
+
+        details = part.provider_details or {}
+        signature = details.get("thought_signature")
+        if signature is None or signature == "":
+            return None
+        if not isinstance(signature, str):
+            raise AviorUsageError(
+                "Invalid `thought_signature` in a part's `provider_details`: "
+                "the value is not a string, so the transcript was corrupted "
+                "after the signature was stored."
+            )
+
+        try:
+            # `b64decode` raises `binascii.Error` for malformed base64 and a
+            # plain `ValueError` for a non-ASCII string; both are
+            # `ValueError`s.
+            return base64.b64decode(signature, validate=True)
+        except ValueError as e:
+            raise AviorUsageError(
+                "Invalid `thought_signature` in a part's `provider_details`: "
+                "the value is not valid base64, so the transcript was "
+                "corrupted after the signature was stored."
+            ) from e

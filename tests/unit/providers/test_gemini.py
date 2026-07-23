@@ -1,17 +1,19 @@
 """Tests for `avior.providers.gemini`."""
 
+import base64
 import logging
-from typing import Any, cast
+from typing import Any, Literal, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
 from google import genai
 from google.genai import errors, types
-from pydantic import BaseModel
+from pydantic import BaseModel, JsonValue
 
 from avior.core.context import RunContext
 from avior.core.exceptions import (
+    AviorUsageError,
     ProviderConnectionError,
     ProviderHTTPError,
     ProviderResponseValidationError,
@@ -21,6 +23,7 @@ from avior.core.messages import (
     Message,
     StopReason,
     TextPart,
+    ThinkingPart,
     ToolCallPart,
     ToolMessage,
     ToolResultError,
@@ -38,10 +41,18 @@ def _settings(
     model: str = "gemini-test",
     max_tokens: int | None = None,
     temperature: float | None = None,
+    thinking: bool | Literal["low", "medium", "high"] | None = None,
+    provider_options: dict[str, dict[str, JsonValue]] | None = None,
 ) -> ModelSettings:
     """Construct `ModelSettings` with sensible defaults for tests."""
 
-    return ModelSettings(model=model, max_tokens=max_tokens, temperature=temperature)
+    return ModelSettings(
+        model=model,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        thinking=thinking,
+        provider_options=provider_options or {},
+    )
 
 
 def _response(
@@ -336,8 +347,10 @@ async def test_complete_maps_no_candidates_to_error() -> None:
     assert result.message.stop_reason == "error"
 
 
-async def test_complete_skips_thought_parts() -> None:
-    """`complete` drops thought-summary parts from the assistant text."""
+async def test_complete_decodes_thought_part_into_thinking_part() -> None:
+    """`complete` decodes a thought-summary part into a `ThinkingPart`,
+    keeping the answer text separate.
+    """
 
     # GIVEN a response interleaving a thought part with the answer text
     response = _response(
@@ -349,8 +362,11 @@ async def test_complete_skips_thought_parts() -> None:
     # WHEN `complete` is awaited
     result = await provider.complete([UserMessage.from_text("hi")], _settings())
 
-    # THEN only the non-thought text survives
-    assert result.message.parts == [TextPart(text="A")]
+    # THEN the thought becomes a `ThinkingPart` and the answer stays text
+    assert result.message.parts == [
+        ThinkingPart(content="thinking..."),
+        TextPart(text="A"),
+    ]
 
 
 async def test_complete_maps_blocked_prompt_to_content_filter() -> None:
@@ -1120,6 +1136,925 @@ async def test_complete_sends_tool_message_as_user_function_responses() -> None:
     assert err_response.id == "err_1"
     assert err_response.name == "get_weather"
     assert err_response.response == {"error": "boom"}
+
+
+# Capability tests
+# -----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        ("gemini-2.5-flash", True),
+        ("gemini-2.5-flash-preview-05-20", True),
+        ("gemini-2.5-flash-lite", True),
+        ("gemini-2.5-pro", True),
+        ("gemini-3-flash-preview", True),
+        ("gemini-3-pro-preview", True),
+        ("gemini-3.1-flash-lite", True),
+        ("gemini-3.1-pro-preview", True),
+        ("gemini-3.5-flash", True),
+        ("gemini-3.5-flash-lite", True),
+        ("gemini-3.6-flash", True),
+        ("gemini-flash-latest", True),
+        ("gemini-flash-lite-latest", True),
+        ("gemini-pro-latest", True),
+        ("models/gemini-2.5-flash", True),
+        ("gemini-2.5-flash-image", False),
+        ("gemini-2.5-flash-preview-tts", False),
+        ("gemini-2.0-flash", False),
+        ("tunedModels/my-fine-tune", False),
+        ("gemini-test", False),
+        ("claude-haiku-4-5", False),
+    ],
+    ids=[
+        "budget-family",
+        "dated-preview-snapshot",
+        "budget-lite-family",
+        "budget-pro-family",
+        "level-flash-3-family",
+        "level-pro-3-family",
+        "level-lite-31-family",
+        "level-pro-31-family",
+        "level-flash-35-family",
+        "level-lite-35-family",
+        "level-flash-36-family",
+        "flash-alias",
+        "flash-lite-alias",
+        "pro-alias",
+        "qualified-resource-name",
+        "image-variant",
+        "tts-variant",
+        "non-thinking-family",
+        "tuned-model",
+        "unknown-model",
+        "foreign-model",
+    ],
+)
+def test_model_capabilities_reports_thinking_support(
+    model: str, expected: bool
+) -> None:
+    """`model_capabilities` reports thinking support for every classified
+    thinking family - by bare id or qualified resource name - and the
+    conservative default otherwise, notably for a named variant (`-image`,
+    `-tts`) that extends a classified family's id but is a different model.
+    """
+
+    # GIVEN a provider (its client is never used to read capabilities)
+    provider = _provider(AsyncMock())
+
+    # WHEN capabilities are read for the model
+    capabilities = provider.model_capabilities(model)
+
+    # THEN thinking support matches the classification
+    assert capabilities.supports_thinking is expected
+
+
+# Thinking config (send) tests
+# -----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("model", "thinking", "expected"),
+    [
+        ("gemini-3.6-flash", "high", {"thinking_level": types.ThinkingLevel.HIGH}),
+        ("gemini-3.6-flash", "low", {"thinking_level": types.ThinkingLevel.LOW}),
+        ("gemini-3.6-flash", False, {"thinking_level": types.ThinkingLevel.MINIMAL}),
+        (
+            "gemini-3.1-flash-lite",
+            False,
+            {"thinking_level": types.ThinkingLevel.MINIMAL},
+        ),
+        ("gemini-3.6-flash", True, None),
+        (
+            "gemini-3.1-flash-lite",
+            True,
+            {"thinking_level": types.ThinkingLevel.MEDIUM},
+        ),
+        (
+            "gemini-3-flash-preview",
+            "medium",
+            {"thinking_level": types.ThinkingLevel.MEDIUM},
+        ),
+        (
+            "gemini-3.1-pro-preview",
+            "low",
+            {"thinking_level": types.ThinkingLevel.LOW},
+        ),
+        ("gemini-3-pro-preview", True, None),
+        ("gemini-2.5-flash", "low", {"thinking_budget": 2048}),
+        ("gemini-2.5-flash", "medium", {"thinking_budget": 8192}),
+        ("gemini-2.5-flash", False, {"thinking_budget": 0}),
+        ("gemini-2.5-flash-lite", False, {"thinking_budget": 0}),
+        ("gemini-2.5-flash", True, None),
+        ("gemini-2.5-flash-lite", True, {"thinking_budget": -1}),
+        ("gemini-2.5-pro", "high", {"thinking_budget": 24576}),
+        ("gemini-2.5-pro", True, None),
+        ("gemini-2.5-flash", None, None),
+    ],
+    ids=[
+        "level-high",
+        "level-low",
+        "level-disable-on-by-default",
+        "level-disable-off-by-default",
+        "level-true-on-by-default-omits",
+        "level-true-off-by-default-medium",
+        "level-preview-tail-resolves",
+        "level-low-on-always-on",
+        "level-true-always-on-omits",
+        "budget-low",
+        "budget-medium",
+        "budget-disable-on-by-default",
+        "budget-disable-off-by-default",
+        "budget-true-on-by-default-omits",
+        "budget-true-off-by-default-dynamic",
+        "budget-high-on-always-on",
+        "budget-true-always-on-omits",
+        "unset-omits",
+    ],
+)
+async def test_complete_maps_thinking_to_native_config(
+    model: str,
+    thinking: bool | Literal["low", "medium", "high"] | None,
+    expected: dict[str, Any] | None,
+) -> None:
+    """`complete` maps the portable `thinking` setting to the model's native
+    `thinking_config` dialect: `thinking_budget` tokens on a Gemini 2.5 model,
+    `thinking_level` on a Gemini 3+ model, omitted when `thinking` is unset or
+    `True` asks for what the model's default already does.
+    """
+
+    # GIVEN settings carrying a portable thinking value for the model
+    mock_client = _mock_client_returning(_text("ok"))
+    provider = _provider(mock_client)
+    settings = _settings(model=model, thinking=thinking)
+
+    # WHEN `complete` is awaited
+    result = await provider.complete([UserMessage.from_text("hi")], settings)
+
+    # THEN the native config matches the expected dialect, and nothing warns
+    config_dump = _call_config_dump(mock_client, exclude_none=True)
+    assert config_dump.get("thinking_config") == expected
+    assert result.warnings == []
+
+
+@pytest.mark.parametrize(
+    ("model", "thinking", "reason"),
+    [
+        (
+            "gemini-2.0-flash",
+            "high",
+            "the model is not a recognized thinking model; if it does think, "
+            "configure thinking via the `gemini` provider options",
+        ),
+        (
+            "gemini-test",
+            True,
+            "the model is not a recognized thinking model; if it does think, "
+            "configure thinking via the `gemini` provider options",
+        ),
+        (
+            "gemini-2.5-pro",
+            False,
+            "the model's thinking is always on and cannot be disabled",
+        ),
+        (
+            "gemini-3-pro-preview",
+            False,
+            "the model's thinking is always on and cannot be disabled",
+        ),
+    ],
+    ids=[
+        "enable-on-non-thinking-family",
+        "enable-on-unknown-model",
+        "disable-on-always-on-budget",
+        "disable-on-always-on-level",
+    ],
+)
+async def test_complete_warns_and_drops_unhonorable_thinking(
+    model: str,
+    thinking: bool | Literal["low", "medium", "high"],
+    reason: str,
+) -> None:
+    """`complete` drops a `thinking` request the model cannot honor, sends no
+    `thinking_config`, and records a warning naming the cause.
+    """
+
+    # GIVEN settings with a thinking request the model cannot honor
+    mock_client = _mock_client_returning(_text("ok"))
+    provider = _provider(mock_client)
+    settings = _settings(model=model, thinking=thinking)
+
+    # WHEN `complete` is awaited
+    result = await provider.complete([UserMessage.from_text("hi")], settings)
+
+    # THEN no thinking config is sent, and a warning records the drop
+    config_dump = _call_config_dump(mock_client, exclude_none=True)
+    assert "thinking_config" not in config_dump
+    thinking_warnings = [w for w in result.warnings if w.setting_name == "thinking"]
+    assert len(thinking_warnings) == 1
+    assert thinking_warnings[0].setting_value == thinking
+    assert thinking_warnings[0].reason == reason
+
+
+async def test_complete_ignores_disable_on_unrecognized_model() -> None:
+    """`thinking=False` on an unrecognized model is a no-op: the model is not
+    classified as thinking, so there is nothing to disable and no warning.
+    """
+
+    # GIVEN settings disabling thinking on an unrecognized model
+    mock_client = _mock_client_returning(_text("ok"))
+    provider = _provider(mock_client)
+    settings = _settings(model="gemini-test", thinking=False)
+
+    # WHEN `complete` is awaited
+    result = await provider.complete([UserMessage.from_text("hi")], settings)
+
+    # THEN no thinking config is sent and nothing warns
+    assert "thinking_config" not in _call_config_dump(mock_client, exclude_none=True)
+    assert result.warnings == []
+
+
+async def test_complete_sends_raw_thinking_config_on_unclassified_model() -> None:
+    """A raw `thinking_config` in the `gemini` provider options is passed
+    through even for a model avior does not classify.
+    """
+
+    # GIVEN settings whose provider options carry a raw thinking config for an
+    # unclassified model
+    mock_client = _mock_client_returning(_text("ok"))
+    provider = _provider(mock_client)
+    settings = _settings(
+        model="gemini-test",
+        provider_options={
+            "gemini": {
+                "thinking_config": {"thinking_budget": 512, "include_thoughts": True}
+            }
+        },
+    )
+
+    # WHEN `complete` is awaited
+    result = await provider.complete([UserMessage.from_text("hi")], settings)
+
+    # THEN the raw config is sent as given, and nothing warns
+    config_dump = _call_config_dump(mock_client, exclude_none=True)
+    assert config_dump.get("thinking_config") == {
+        "thinking_budget": 512,
+        "include_thoughts": True,
+    }
+    assert result.warnings == []
+
+
+async def test_complete_raw_thinking_config_overrides_portable_thinking() -> None:
+    """A raw `thinking_config` takes precedence over the portable `thinking`
+    setting.
+    """
+
+    # GIVEN settings carrying both a portable thinking level and a raw config
+    mock_client = _mock_client_returning(_text("ok"))
+    provider = _provider(mock_client)
+    settings = _settings(
+        model="gemini-2.5-flash",
+        thinking="high",
+        provider_options={"gemini": {"thinking_config": {"thinking_budget": 128}}},
+    )
+
+    # WHEN `complete` is awaited
+    result = await provider.complete([UserMessage.from_text("hi")], settings)
+
+    # THEN the raw config wins over the portable mapping
+    config_dump = _call_config_dump(mock_client, exclude_none=True)
+    assert config_dump.get("thinking_config") == {"thinking_budget": 128}
+    assert result.warnings == []
+
+
+async def test_complete_rejects_unknown_provider_options_key() -> None:
+    """An unknown key in the `gemini` provider options slice raises
+    `AviorUsageError` before any request is sent.
+    """
+
+    # GIVEN settings whose `gemini` provider options carry an unknown key
+    mock_client = _mock_client_returning(_text("ok"))
+    provider = _provider(mock_client)
+    settings = _settings(
+        model="gemini-2.5-flash",
+        provider_options={"gemini": {"thinking": {"thinking_budget": 128}}},
+    )
+
+    # WHEN `complete` is invoked
+    # THEN the invalid slice is rejected and no request is sent
+    with pytest.raises(AviorUsageError, match="provider_options"):
+        await provider.complete([UserMessage.from_text("hi")], settings)
+    mock_client.aio.models.generate_content.assert_not_called()
+
+
+# Thinking round-trip tests
+# -----------------------------------------------------------------------------
+
+
+_SIGNATURE = b"\x00\x01binary-signature\xff"
+"""A signature with non-UTF-8 bytes, as the Gemini API may produce."""
+
+_SIGNATURE_B64 = base64.b64encode(_SIGNATURE).decode("ascii")
+"""The base64 text form `provider_details` stores for `_SIGNATURE`."""
+
+
+async def test_complete_keeps_signature_from_function_call_part() -> None:
+    """`complete` stores a function-call part's thought signature
+    base64-encoded in the `ToolCallPart`'s `provider_details`.
+    """
+
+    # GIVEN a response whose function-call part carries a thought signature
+    response = _response(
+        types.Part(
+            function_call=types.FunctionCall(
+                id="call_1",
+                name="get_weather",
+                args={"city": "Paris"},
+            ),
+            thought_signature=_SIGNATURE,
+        )
+    )
+    provider = _provider(_mock_client_returning(response))
+
+    # WHEN `complete` is awaited
+    result = await provider.complete([UserMessage.from_text("hi")], _settings())
+
+    # THEN the tool call keeps the signature, base64-encoded
+    assert result.message.parts == [
+        ToolCallPart(
+            call_id="call_1",
+            tool_name="get_weather",
+            args={"city": "Paris"},
+            provider_details={"thought_signature": _SIGNATURE_B64},
+        )
+    ]
+
+
+async def test_complete_keeps_signature_from_text_part() -> None:
+    """`complete` stores a text part's thought signature base64-encoded in the
+    `TextPart`'s `provider_details`.
+    """
+
+    # GIVEN a response whose text part carries a thought signature
+    response = _response(types.Part(text="391", thought_signature=_SIGNATURE))
+    provider = _provider(_mock_client_returning(response))
+
+    # WHEN `complete` is awaited
+    result = await provider.complete([UserMessage.from_text("hi")], _settings())
+
+    # THEN the text part keeps the signature, base64-encoded
+    assert result.message.parts == [
+        TextPart(
+            text="391",
+            provider_details={"thought_signature": _SIGNATURE_B64},
+        )
+    ]
+
+
+async def test_complete_keeps_signature_from_thought_part() -> None:
+    """`complete` stores a thought part's thought signature base64-encoded in
+    the `ThinkingPart`'s `provider_details`.
+    """
+
+    # GIVEN a response whose thought part carries a thought signature
+    response = _response(
+        types.Part(text="thinking...", thought=True, thought_signature=_SIGNATURE),
+        types.Part(text="A"),
+    )
+    provider = _provider(_mock_client_returning(response))
+
+    # WHEN `complete` is awaited
+    result = await provider.complete([UserMessage.from_text("hi")], _settings())
+
+    # THEN the thinking part keeps the signature, base64-encoded
+    assert result.message.parts == [
+        ThinkingPart(
+            content="thinking...",
+            provider_details={"thought_signature": _SIGNATURE_B64},
+        ),
+        TextPart(text="A"),
+    ]
+
+
+async def test_complete_echoes_own_signatures_verbatim() -> None:
+    """`complete` echoes this provider's thought signatures back on their
+    original parts, decoded to the exact bytes the Gemini API produced.
+    """
+
+    # GIVEN a continuation transcript whose Gemini turn carries a signed
+    # thinking part, a signed text part, and a signed tool call
+    mock_client = _mock_client_returning(_text("ok"))
+    provider = _provider(mock_client)
+    history: list[Message] = [
+        UserMessage.from_text("weather?"),
+        AssistantMessage(
+            parts=[
+                ThinkingPart(
+                    content="hmm",
+                    provider_details={"thought_signature": _SIGNATURE_B64},
+                ),
+                TextPart(
+                    text="Checking.",
+                    provider_details={"thought_signature": _SIGNATURE_B64},
+                ),
+                ToolCallPart(
+                    call_id="call_1",
+                    tool_name="get_weather",
+                    args={"city": "Paris"},
+                    provider_details={"thought_signature": _SIGNATURE_B64},
+                ),
+            ],
+            stop_reason="tool_use",
+            provider_name="gemini",
+        ),
+        ToolMessage(
+            parts=[
+                ToolResultPart(call_id="call_1", result=ToolResultOk(content="sunny"))
+            ]
+        ),
+    ]
+
+    # WHEN `complete` is invoked
+    await provider.complete(history, _settings())
+
+    # THEN each wire part carries the original signature bytes, and the
+    # thinking part is echoed as a thought part
+    model_turn = _call_contents(mock_client)[1]
+    assert model_turn.parts is not None
+    thought_part, text_part, call_part = model_turn.parts
+    assert thought_part.thought is True
+    assert thought_part.text == "hmm"
+    assert thought_part.thought_signature == _SIGNATURE
+    assert text_part.text == "Checking."
+    assert text_part.thought_signature == _SIGNATURE
+    assert call_part.function_call is not None
+    assert call_part.thought_signature == _SIGNATURE
+
+
+async def test_complete_serialized_transcript_round_trips_signature() -> None:
+    """A binary signature survives the full round trip: decoded from a
+    response, serialized to JSON, loaded back, and echoed with the exact
+    bytes the Gemini API produced.
+    """
+
+    # GIVEN an assistant turn decoded from a response with a signed call
+    decode_client = _mock_client_returning(
+        _response(
+            types.Part(
+                function_call=types.FunctionCall(
+                    id="call_1", name="get_weather", args={"city": "Paris"}
+                ),
+                thought_signature=_SIGNATURE,
+            ),
+        )
+    )
+    decode_provider = _provider(decode_client)
+    decoded = await decode_provider.complete(
+        [UserMessage.from_text("weather?")], _settings()
+    )
+
+    # AND that turn serialized to JSON and restored
+    restored = AssistantMessage.model_validate_json(decoded.message.model_dump_json())
+
+    # WHEN a continuation carrying the restored turn is completed
+    echo_client = _mock_client_returning(_text("ok"))
+    echo_provider = _provider(echo_client)
+    history: list[Message] = [
+        UserMessage.from_text("weather?"),
+        restored,
+        ToolMessage(
+            parts=[
+                ToolResultPart(call_id="call_1", result=ToolResultOk(content="sunny"))
+            ]
+        ),
+    ]
+    await echo_provider.complete(history, _settings())
+
+    # THEN the echoed wire part carries the original signature bytes
+    model_turn = _call_contents(echo_client)[1]
+    assert model_turn.parts is not None
+    assert model_turn.parts[0].thought_signature == _SIGNATURE
+
+
+async def test_complete_treats_empty_signature_bytes_as_absent() -> None:
+    """A response part whose `thought_signature` is empty bytes decodes into
+    a part with no `provider_details`: there is no signature to carry.
+    """
+
+    # GIVEN a response whose function-call part carries empty signature bytes
+    response = _response(
+        types.Part(
+            function_call=types.FunctionCall(
+                id="call_1", name="get_weather", args={"city": "Paris"}
+            ),
+            thought_signature=b"",
+        )
+    )
+    provider = _provider(_mock_client_returning(response))
+
+    # WHEN `complete` is awaited
+    result = await provider.complete([UserMessage.from_text("hi")], _settings())
+
+    # THEN the tool call carries no provider details
+    assert result.message.parts == [
+        ToolCallPart(call_id="call_1", tool_name="get_weather", args={"city": "Paris"})
+    ]
+
+
+@pytest.mark.parametrize(
+    "provider_name",
+    ["openai", None],
+    ids=["foreign-provider", "hand-built"],
+)
+async def test_complete_stamps_skip_placeholder_on_unsigned_first_call(
+    provider_name: str | None,
+) -> None:
+    """A turn whose first `function_call` has no signature to echo gets the
+    signature-skip placeholder, and later calls stay unsigned.
+
+    A foreign or hand-built turn carries no Gemini signature, yet thinking
+    Gemini models reject a replayed turn whose first `function_call` part has
+    none - the placeholder is what keeps such transcripts replayable.
+    """
+
+    # GIVEN a continuation transcript whose tool-calling turn is not
+    # signature-bearing (foreign or hand-built, parametrized)
+    mock_client = _mock_client_returning(_text("ok"))
+    provider = _provider(mock_client)
+    history: list[Message] = [
+        UserMessage.from_text("weather?"),
+        AssistantMessage(
+            parts=[
+                ToolCallPart(call_id="a_1", tool_name="get_weather", args={}),
+                ToolCallPart(call_id="a_2", tool_name="get_weather", args={}),
+            ],
+            stop_reason="tool_use",
+            provider_name=provider_name,
+        ),
+        ToolMessage(
+            parts=[
+                ToolResultPart(call_id="a_1", result=ToolResultOk(content="sunny")),
+                ToolResultPart(call_id="a_2", result=ToolResultOk(content="rainy")),
+            ]
+        ),
+    ]
+
+    # WHEN `complete` is invoked
+    await provider.complete(history, _settings())
+
+    # THEN the first call carries the placeholder and the second none
+    model_turn = _call_contents(mock_client)[1]
+    assert model_turn.parts is not None
+    first, second = model_turn.parts
+    assert first.thought_signature == b"skip_thought_signature_validator"
+    assert second.thought_signature is None
+
+
+async def test_complete_drops_foreign_signature_and_stamps_placeholder() -> None:
+    """A foreign turn's `provider_details` are never echoed: the foreign
+    token is dropped and the first `function_call` gets the placeholder.
+    """
+
+    # GIVEN a continuation transcript whose signed tool-call turn came from a
+    # different provider
+    mock_client = _mock_client_returning(_text("ok"))
+    provider = _provider(mock_client)
+    history: list[Message] = [
+        UserMessage.from_text("weather?"),
+        AssistantMessage(
+            parts=[
+                ToolCallPart(
+                    call_id="call_1",
+                    tool_name="get_weather",
+                    args={},
+                    provider_details={"thought_signature": _SIGNATURE_B64},
+                ),
+            ],
+            stop_reason="tool_use",
+            provider_name="openai",
+        ),
+        ToolMessage(
+            parts=[
+                ToolResultPart(call_id="call_1", result=ToolResultOk(content="sunny"))
+            ]
+        ),
+    ]
+
+    # WHEN `complete` is invoked
+    await provider.complete(history, _settings())
+
+    # THEN the foreign token is not sent; the placeholder stands in
+    model_turn = _call_contents(mock_client)[1]
+    assert model_turn.parts is not None
+    assert model_turn.parts[0].thought_signature == (
+        b"skip_thought_signature_validator"
+    )
+
+
+async def test_complete_stamps_placeholder_on_own_unsigned_first_call() -> None:
+    """An own-provider turn whose first `function_call` carries no signature
+    gets the placeholder: a Gemini model with thinking disabled signs
+    nothing, and its replay must still pass a validating model.
+    """
+
+    # GIVEN a continuation transcript whose Gemini turn has an unsigned call
+    mock_client = _mock_client_returning(_text("ok"))
+    provider = _provider(mock_client)
+    history: list[Message] = [
+        UserMessage.from_text("weather?"),
+        AssistantMessage(
+            parts=[ToolCallPart(call_id="call_1", tool_name="get_weather", args={})],
+            stop_reason="tool_use",
+            provider_name="gemini",
+        ),
+        ToolMessage(
+            parts=[
+                ToolResultPart(call_id="call_1", result=ToolResultOk(content="sunny"))
+            ]
+        ),
+    ]
+
+    # WHEN `complete` is invoked
+    await provider.complete(history, _settings())
+
+    # THEN the unsigned call carries the placeholder
+    model_turn = _call_contents(mock_client)[1]
+    assert model_turn.parts is not None
+    assert model_turn.parts[0].thought_signature == (
+        b"skip_thought_signature_validator"
+    )
+
+
+async def test_complete_stamps_placeholder_on_each_unsigned_turn() -> None:
+    """Placeholder stamping is per turn: in a multi-step chain, every model
+    turn's first unsigned `function_call` gets the placeholder.
+
+    The Gemini API validates each replayed model turn independently, so a
+    placeholder on only the newest turn would still leave older turns
+    rejected.
+    """
+
+    # GIVEN a two-step tool-chain transcript with unsigned tool calls
+    mock_client = _mock_client_returning(_text("ok"))
+    provider = _provider(mock_client)
+    history: list[Message] = [
+        UserMessage.from_text("weather?"),
+        AssistantMessage(
+            parts=[ToolCallPart(call_id="a_1", tool_name="get_weather", args={})],
+            stop_reason="tool_use",
+            provider_name="gemini",
+        ),
+        ToolMessage(
+            parts=[ToolResultPart(call_id="a_1", result=ToolResultOk(content="sunny"))]
+        ),
+        AssistantMessage(
+            parts=[ToolCallPart(call_id="b_1", tool_name="get_weather", args={})],
+            stop_reason="tool_use",
+            provider_name="gemini",
+        ),
+        ToolMessage(
+            parts=[ToolResultPart(call_id="b_1", result=ToolResultOk(content="rainy"))]
+        ),
+    ]
+
+    # WHEN `complete` is invoked
+    await provider.complete(history, _settings())
+
+    # THEN each model turn's call carries the placeholder
+    contents = _call_contents(mock_client)
+    first_turn, second_turn = contents[1], contents[3]
+    assert first_turn.parts is not None and second_turn.parts is not None
+    assert first_turn.parts[0].thought_signature == (
+        b"skip_thought_signature_validator"
+    )
+    assert second_turn.parts[0].thought_signature == (
+        b"skip_thought_signature_validator"
+    )
+
+
+@pytest.mark.parametrize(
+    "corrupted",
+    ["!!!not-base64!!!", "sign\u00e4ture", 42],
+    ids=["invalid-base64", "non-ascii", "non-string"],
+)
+async def test_complete_rejects_corrupted_signature(corrupted: JsonValue) -> None:
+    """A `thought_signature` that is not a string or not valid base64 raises
+    `AviorUsageError` before any request is sent
+    """
+
+    # GIVEN a transcript whose Gemini turn carries a corrupted signature
+    # (parametrized as `corrupted`)
+    mock_client = _mock_client_returning(_text("ok"))
+    provider = _provider(mock_client)
+    history: list[Message] = [
+        UserMessage.from_text("weather?"),
+        AssistantMessage(
+            parts=[
+                ToolCallPart(
+                    call_id="call_1",
+                    tool_name="get_weather",
+                    args={},
+                    provider_details={"thought_signature": corrupted},
+                )
+            ],
+            stop_reason="tool_use",
+            provider_name="gemini",
+        ),
+        ToolMessage(
+            parts=[ToolResultPart(call_id="call_1", result=ToolResultOk(content="x"))]
+        ),
+    ]
+
+    # WHEN `complete` is invoked
+    # THEN the corrupted signature is rejected and no request is sent
+    with pytest.raises(AviorUsageError, match="thought_signature"):
+        await provider.complete(history, _settings())
+    mock_client.aio.models.generate_content.assert_not_called()
+
+
+async def test_complete_treats_empty_signature_as_absent() -> None:
+    """An empty `thought_signature` string counts as no signature: the first
+    `function_call` gets the placeholder instead of an empty signature.
+    """
+
+    # GIVEN a transcript whose Gemini turn carries an empty signature
+    mock_client = _mock_client_returning(_text("ok"))
+    provider = _provider(mock_client)
+    history: list[Message] = [
+        UserMessage.from_text("weather?"),
+        AssistantMessage(
+            parts=[
+                ToolCallPart(
+                    call_id="call_1",
+                    tool_name="get_weather",
+                    args={},
+                    provider_details={"thought_signature": ""},
+                )
+            ],
+            stop_reason="tool_use",
+            provider_name="gemini",
+        ),
+        ToolMessage(
+            parts=[ToolResultPart(call_id="call_1", result=ToolResultOk(content="x"))]
+        ),
+    ]
+
+    # WHEN `complete` is invoked
+    await provider.complete(history, _settings())
+
+    # THEN the placeholder stands in for the empty signature
+    model_turn = _call_contents(mock_client)[1]
+    assert model_turn.parts is not None
+    assert model_turn.parts[0].thought_signature == (
+        b"skip_thought_signature_validator"
+    )
+
+
+async def test_complete_keeps_later_calls_unsigned_when_first_is_signed() -> None:
+    """A signed first `function_call` suppresses the placeholder: later
+    unsigned calls in the turn stay unsigned, matching the shape the Gemini
+    API itself produces for parallel calls.
+    """
+
+    # GIVEN a continuation transcript whose Gemini turn has a signed first
+    # call and an unsigned second call
+    mock_client = _mock_client_returning(_text("ok"))
+    provider = _provider(mock_client)
+    history: list[Message] = [
+        UserMessage.from_text("weather?"),
+        AssistantMessage(
+            parts=[
+                ToolCallPart(
+                    call_id="a_1",
+                    tool_name="get_weather",
+                    args={},
+                    provider_details={"thought_signature": _SIGNATURE_B64},
+                ),
+                ToolCallPart(
+                    call_id="a_2",
+                    tool_name="get_weather",
+                    args={},
+                ),
+            ],
+            stop_reason="tool_use",
+            provider_name="gemini",
+        ),
+        ToolMessage(
+            parts=[
+                ToolResultPart(call_id="a_1", result=ToolResultOk(content="sunny")),
+                ToolResultPart(call_id="a_2", result=ToolResultOk(content="rainy")),
+            ]
+        ),
+    ]
+
+    # WHEN `complete` is invoked
+    await provider.complete(history, _settings())
+
+    # THEN the first call echoes its signature and the second gets nothing
+    model_turn = _call_contents(mock_client)[1]
+    assert model_turn.parts is not None
+    first, second = model_turn.parts
+    assert first.thought_signature == _SIGNATURE
+    assert second.thought_signature is None
+
+
+async def test_complete_stamps_placeholder_on_first_call_not_first_part() -> None:
+    """The placeholder targets the turn's first `function_call` part: a text
+    part before it does not receive the placeholder.
+    """
+
+    # GIVEN a continuation transcript whose hand-built turn puts text before
+    # an unsigned tool call
+    mock_client = _mock_client_returning(_text("ok"))
+    provider = _provider(mock_client)
+    history: list[Message] = [
+        UserMessage.from_text("weather?"),
+        AssistantMessage(
+            parts=[
+                TextPart(text="Checking."),
+                ToolCallPart(call_id="call_1", tool_name="get_weather", args={}),
+            ],
+            stop_reason="tool_use",
+        ),
+        ToolMessage(
+            parts=[
+                ToolResultPart(call_id="call_1", result=ToolResultOk(content="sunny"))
+            ]
+        ),
+    ]
+
+    # WHEN `complete` is invoked
+    await provider.complete(history, _settings())
+
+    # THEN the text part stays unsigned and the call carries the placeholder
+    model_turn = _call_contents(mock_client)[1]
+    assert model_turn.parts is not None
+    text_part, call_part = model_turn.parts
+    assert text_part.thought_signature is None
+    assert call_part.thought_signature == b"skip_thought_signature_validator"
+
+
+async def test_complete_drops_thinking_part_without_token() -> None:
+    """A reasoning step with no signature is dropped from the wire turn: the
+    Gemini API needs nothing back from it.
+    """
+
+    # GIVEN a continuation transcript whose Gemini turn holds an unsigned
+    # thinking part next to the answer text
+    mock_client = _mock_client_returning(_text("ok"))
+    provider = _provider(mock_client)
+    history: list[Message] = [
+        UserMessage.from_text("hi"),
+        AssistantMessage(
+            parts=[ThinkingPart(content="hmm"), TextPart(text="Hello.")],
+            stop_reason="stop",
+            provider_name="gemini",
+        ),
+        UserMessage.from_text("and again?"),
+    ]
+
+    # WHEN `complete` is invoked
+    await provider.complete(history, _settings())
+
+    # THEN only the text part is sent
+    model_turn = _call_contents(mock_client)[1]
+    assert model_turn.parts is not None
+    assert len(model_turn.parts) == 1
+    assert model_turn.parts[0].text == "Hello."
+    assert model_turn.parts[0].thought is None
+
+
+async def test_complete_omits_assistant_turn_that_filters_to_no_content() -> None:
+    """An assistant turn whose parts all drop out (only reasoning steps, none
+    of them echoable) is omitted from the request instead of sent empty.
+    """
+
+    # GIVEN a transcript whose middle turn is a foreign thinking-only turn
+    mock_client = _mock_client_returning(_text("ok"))
+    provider = _provider(mock_client)
+    history: list[Message] = [
+        UserMessage.from_text("hi"),
+        AssistantMessage(
+            parts=[
+                ThinkingPart(
+                    content="hmm",
+                    provider_details={"signature": "sig"},
+                )
+            ],
+            stop_reason="stop",
+            provider_name="anthropic",
+        ),
+        UserMessage.from_text("and again?"),
+    ]
+
+    # WHEN `complete` is invoked
+    await provider.complete(history, _settings())
+
+    # THEN the thinking-only turn is omitted from the wire transcript
+    contents = _call_contents(mock_client)
+    assert len(contents) == 2
+    assert all(content.role == "user" for content in contents)
 
 
 # Lifecycle tests
