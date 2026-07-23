@@ -14,7 +14,7 @@ the underlying API.
 
 from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
 type StopReason = Literal[
     "stop",
@@ -52,12 +52,27 @@ without branching on vendor specifics:
 class TextPart(BaseModel):
     """A plain text content part of a message."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, allow_inf_nan=False)
 
     kind: Literal["text"] = "text"
 
     text: str
     """The text content."""
+
+    provider_details: dict[str, JsonValue] | None = None
+    """Opaque provider data the model expects to receive back unchanged on a
+    later turn.  Carries the provider's round-trip token for the part - for
+    example a Gemini `thought_signature`, which the Gemini API attaches to the
+    final text part of a response produced without tool calls.
+
+    A provider sets it on the parts it produces; the turn's `provider_name`
+    records the owner, so the data is sent back only to that same provider.  A
+    different provider drops it, since the token is provider-specific and
+    non-portable.
+
+    Despite the message being frozen, the dict's contents are not - do not
+    mutate them in place.
+    """
 
 
 class ToolCallPart(BaseModel):
@@ -206,6 +221,28 @@ class UserMessage(BaseModel):
     parts: list[TextPart]
     """The caller's input, as text parts."""
 
+    @model_validator(mode="after")
+    def _check_no_provider_details(self) -> Self:
+        """Reject a user turn whose part carries `provider_details`.
+
+        `provider_details` holds opaque data of the provider that produced the
+        part.  A user turn is authored by the caller, not by a provider, so
+        such data has no owner and can never be sent back.
+
+        Raises:
+            ValueError: A part carries `provider_details`.  Pydantic surfaces
+                it as a `ValidationError`.
+        """
+
+        if any(part.provider_details is not None for part in self.parts):
+            raise ValueError(
+                "user-message parts must not carry `provider_details`; it "
+                "holds opaque data of the provider that produced a turn, and "
+                "a user turn is not produced by a provider"
+            )
+
+        return self
+
     @classmethod
     def from_text(cls, text: str) -> Self:
         """Construct a user message with a single `TextPart`."""
@@ -241,8 +278,36 @@ class AssistantMessage(BaseModel):
 
     It records which provider's opaque part data the turn carries, so that data
     is sent back only to that same provider and never replayed to a different
-    one.
+    one.  Construction fails when any part carries `provider_details` and no
+    `provider_name` is set.
     """
+
+    @model_validator(mode="after")
+    def _check_provider_details_owned(self) -> Self:
+        """Reject a turn whose parts carry `provider_details` with no owner.
+
+        `provider_details` holds opaque data of the provider that produced the
+        turn, and adapters send it back only to that provider - `provider_name`
+        names the owner.  Without the name the data can never be sent back, so
+        it would be silently ignored on every later call; failing at
+        construction surfaces the mistake where it is made.
+
+        Raises:
+            ValueError: A part carries `provider_details` and no
+                `provider_name` is set.  Pydantic surfaces it as a
+                `ValidationError`.
+        """
+
+        if not self.provider_name and any(
+            part.provider_details is not None for part in self.parts
+        ):
+            raise ValueError(
+                "parts carry `provider_details` but `provider_name` is not "
+                "set; name the provider that produced the turn so the data "
+                "can be sent back to it, or drop the `provider_details`"
+            )
+
+        return self
 
     @property
     def text(self) -> str | None:
