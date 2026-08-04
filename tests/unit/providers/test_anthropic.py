@@ -14,8 +14,8 @@ from anthropic import (
     RateLimitError,
     omit,
 )
-from anthropic.types import Message as AnthropicMessage
 from anthropic.types import (
+    ContentBlock,
     RedactedThinkingBlock,
     ServerToolUseBlock,
     TextBlock,
@@ -23,6 +23,7 @@ from anthropic.types import (
     ToolUseBlock,
     Usage,
 )
+from anthropic.types import Message as AnthropicMessage
 from pydantic import BaseModel
 
 from avior.core.context import RunContext
@@ -68,10 +69,24 @@ def _settings(
     )
 
 
-def _response(*texts: str, usage: Usage | None = None) -> AnthropicMessage:
-    """Build a minimal `anthropic.types.Message` response with text blocks.
+def _response_with_content(
+    content: list[ContentBlock],
+    *,
+    stop_reason: Literal[
+        "end_turn",
+        "max_tokens",
+        "stop_sequence",
+        "tool_use",
+        "pause_turn",
+        "refusal",
+    ]
+    | None = "end_turn",
+    usage: Usage | None = None,
+) -> AnthropicMessage:
+    """Build an assistant response carrying the given content blocks.
 
-    Pass `usage` to attach token usage (default: a zeroed `Usage`).
+    `stop_reason` defaults to a normal `end_turn` finish.  Pass `usage` to
+    attach token usage (default: a zeroed `Usage`).
     """
 
     return AnthropicMessage(
@@ -79,10 +94,22 @@ def _response(*texts: str, usage: Usage | None = None) -> AnthropicMessage:
         type="message",
         role="assistant",
         model="claude-test",
-        content=[TextBlock(type="text", text=t) for t in texts],
-        stop_reason="end_turn",
+        content=content,
+        stop_reason=stop_reason,
         stop_sequence=None,
         usage=usage if usage is not None else Usage(input_tokens=0, output_tokens=0),
+    )
+
+
+def _response(*texts: str, usage: Usage | None = None) -> AnthropicMessage:
+    """Build a minimal `anthropic.types.Message` response with text blocks.
+
+    Pass `usage` to attach token usage (default: a zeroed `Usage`).
+    """
+
+    return _response_with_content(
+        [TextBlock(type="text", text=t) for t in texts],
+        usage=usage,
     )
 
 
@@ -98,15 +125,9 @@ def _response_with_stop_reason(
 ) -> AnthropicMessage:
     """Build a minimal assistant response with the given `stop_reason`."""
 
-    return AnthropicMessage(
-        id="msg_test",
-        type="message",
-        role="assistant",
-        model="claude-test",
-        content=[TextBlock(type="text", text="...")],
+    return _response_with_content(
+        [TextBlock(type="text", text="...")],
         stop_reason=stop_reason,
-        stop_sequence=None,
-        usage=Usage(input_tokens=0, output_tokens=0),
     )
 
 
@@ -132,15 +153,9 @@ def _tool_use_response(
 ) -> AnthropicMessage:
     """Build an assistant response carrying a single `tool_use` block."""
 
-    return AnthropicMessage(
-        id="msg_test",
-        type="message",
-        role="assistant",
-        model="claude-test",
-        content=[ToolUseBlock(type="tool_use", id=call_id, name=tool_name, input=args)],
+    return _response_with_content(
+        [ToolUseBlock(type="tool_use", id=call_id, name=tool_name, input=args)],
         stop_reason="tool_use",
-        stop_sequence=None,
-        usage=Usage(input_tokens=0, output_tokens=0),
     )
 
 
@@ -383,19 +398,12 @@ async def test_complete_raises_on_unsupported_content_block() -> None:
     """
 
     # GIVEN a response carrying a server-tool-use block the adapter does not map
-    response = AnthropicMessage(
-        id="msg_test",
-        type="message",
-        role="assistant",
-        model="claude-test",
-        content=[
+    response = _response_with_content(
+        [
             ServerToolUseBlock(
                 type="server_tool_use", id="srv_1", name="web_search", input={}
             )
-        ],
-        stop_reason="end_turn",
-        stop_sequence=None,
-        usage=Usage(input_tokens=0, output_tokens=0),
+        ]
     )
     provider = _provider(_mock_client_returning(response))
 
@@ -667,6 +675,41 @@ async def test_complete_parses_tool_use_block_into_tool_call_part() -> None:
     ]
 
 
+async def test_complete_parses_parallel_tool_use_blocks() -> None:
+    """Two `tool_use` blocks in one response decode into two `ToolCallPart`s."""
+
+    # GIVEN a response carrying two tool-use blocks
+    response = _response_with_content(
+        [
+            ToolUseBlock(
+                type="tool_use",
+                id="call_1",
+                name="get_weather",
+                input={"city": "Paris"},
+            ),
+            ToolUseBlock(
+                type="tool_use",
+                id="call_2",
+                name="get_weather",
+                input={"city": "Berlin"},
+            ),
+        ],
+        stop_reason="tool_use",
+    )
+    provider = _provider(_mock_client_returning(response))
+
+    # WHEN `complete` is awaited
+    result = await provider.complete([UserMessage.from_text("weather?")], _settings())
+
+    # THEN both blocks decode, in order, each with its own id
+    assert result.message.parts == [
+        ToolCallPart(call_id="call_1", tool_name="get_weather", args={"city": "Paris"}),
+        ToolCallPart(
+            call_id="call_2", tool_name="get_weather", args={"city": "Berlin"}
+        ),
+    ]
+
+
 async def test_complete_raises_when_tool_use_stop_reason_has_no_tool_call() -> None:
     """`stop_reason="tool_use"` with no decoded tool call raises.
 
@@ -676,15 +719,9 @@ async def test_complete_raises_when_tool_use_stop_reason_has_no_tool_call() -> N
     """
 
     # GIVEN a `tool_use`-stop response carrying only a text block
-    response = AnthropicMessage(
-        id="msg_test",
-        type="message",
-        role="assistant",
-        model="claude-test",
-        content=[TextBlock(type="text", text="...")],
+    response = _response_with_content(
+        [TextBlock(type="text", text="...")],
         stop_reason="tool_use",
-        stop_sequence=None,
-        usage=Usage(input_tokens=0, output_tokens=0),
     )
     provider = _provider(_mock_client_returning(response))
 
@@ -1183,17 +1220,8 @@ async def test_complete_decodes_thinking_block_into_thinking_part() -> None:
     """
 
     # GIVEN a response carrying a thinking block with text and a signature
-    response = AnthropicMessage(
-        id="msg_test",
-        type="message",
-        role="assistant",
-        model="claude-test",
-        content=[
-            ThinkingBlock(type="thinking", thinking="let me think", signature="sig-1")
-        ],
-        stop_reason="end_turn",
-        stop_sequence=None,
-        usage=Usage(input_tokens=0, output_tokens=0),
+    response = _response_with_content(
+        [ThinkingBlock(type="thinking", thinking="let me think", signature="sig-1")]
     )
     provider = _provider(_mock_client_returning(response))
 
@@ -1215,15 +1243,8 @@ async def test_complete_decodes_redacted_thinking_block_into_thinking_part() -> 
     """
 
     # GIVEN a response carrying a redacted thinking block
-    response = AnthropicMessage(
-        id="msg_test",
-        type="message",
-        role="assistant",
-        model="claude-test",
-        content=[RedactedThinkingBlock(type="redacted_thinking", data="enc-blob")],
-        stop_reason="end_turn",
-        stop_sequence=None,
-        usage=Usage(input_tokens=0, output_tokens=0),
+    response = _response_with_content(
+        [RedactedThinkingBlock(type="redacted_thinking", data="enc-blob")]
     )
     provider = _provider(_mock_client_returning(response))
 

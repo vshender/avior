@@ -556,6 +556,27 @@ async def test_complete_translates_timeout_as_connection_error() -> None:
     assert exc_info.value.__cause__ is transport_error
 
 
+async def test_complete_propagates_unrecognized_sdk_error_untranslated() -> None:
+    """An error outside the translated Gemini SDK families propagates
+    unchanged.
+
+    The Gemini SDK has no single base exception class usable as a catch-all,
+    so the adapter translates only the error families it knows; anything else
+    must surface untranslated rather than be wrapped in a provider error.
+    """
+
+    # GIVEN a mock client raising an error outside the translated families
+    unrecognized_error = ValueError("unexpected SDK failure")
+    mock_client = _mock_client_raising(unrecognized_error)
+    provider = _provider(mock_client)
+
+    # WHEN `complete` is invoked
+    # THEN the error propagates unchanged, not wrapped in a provider error
+    with pytest.raises(ValueError) as exc_info:
+        await provider.complete([UserMessage.from_text("hi")], _settings())
+    assert exc_info.value is unrecognized_error
+
+
 # Stop-reason mapping tests
 # -----------------------------------------------------------------------------
 
@@ -870,9 +891,13 @@ async def test_complete_synthesizes_distinct_ids_for_parallel_same_name_calls() 
     result = await provider.complete([UserMessage.from_text("weather?")], _settings())
 
     # THEN the two calls carry distinct ids
-    call_ids = [p.call_id for p in result.message.parts if isinstance(p, ToolCallPart)]
+    tool_calls = [p for p in result.message.parts if isinstance(p, ToolCallPart)]
+    call_ids = [c.call_id for c in tool_calls]
     assert len(call_ids) == 2
     assert len(set(call_ids)) == 2
+
+    # AND the calls decode in order, each with its own arguments
+    assert [c.args for c in tool_calls] == [{"city": "Paris"}, {"city": "Berlin"}]
 
 
 async def test_complete_disambiguates_duplicate_provider_call_ids() -> None:

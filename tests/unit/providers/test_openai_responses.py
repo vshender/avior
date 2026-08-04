@@ -159,16 +159,30 @@ def _status_response(
     )
 
 
-def _response_with_output(output: list[ResponseOutputItem]) -> Response:
-    """Build a completed `Response` carrying the given output items."""
+def _response_with_output(
+    output: list[ResponseOutputItem],
+    *,
+    parallel_tool_calls: bool = False,
+) -> Response:
+    """Build a completed `Response` carrying the given output items.
 
+    `parallel_tool_calls` echoes the request setting.  Pass `True` when
+    `output` carries more than one `function_call`: multiple calls in one
+    response are impossible with parallel calls disabled, so that
+    combination is rejected.
+    """
+
+    calls = sum(1 for item in output if isinstance(item, ResponseFunctionToolCall))
+    assert parallel_tool_calls or calls <= 1, (
+        "parallel_tool_calls=False cannot carry multiple function calls"
+    )
     return Response(
         id="resp_test",
         object="response",
         created_at=0.0,
         model="gpt-test",
         output=output,
-        parallel_tool_calls=False,
+        parallel_tool_calls=parallel_tool_calls,
         tool_choice="auto",
         tools=[],
         status="completed",
@@ -178,12 +192,8 @@ def _response_with_output(output: list[ResponseOutputItem]) -> Response:
 def _refusal_response(refusal_text: str) -> Response:
     """Build a completed `Response` whose message content is a refusal."""
 
-    return Response(
-        id="resp_test",
-        object="response",
-        created_at=0.0,
-        model="gpt-test",
-        output=[
+    return _response_with_output(
+        [
             ResponseOutputMessage(
                 id="msg_test",
                 type="message",
@@ -191,11 +201,7 @@ def _refusal_response(refusal_text: str) -> Response:
                 status="completed",
                 content=[ResponseOutputRefusal(type="refusal", refusal=refusal_text)],
             )
-        ],
-        parallel_tool_calls=False,
-        tool_choice="auto",
-        tools=[],
-        status="completed",
+        ]
     )
 
 
@@ -224,23 +230,15 @@ def _function_call_response(
     `arguments` is the raw JSON string the Responses API uses for call args.
     """
 
-    return Response(
-        id="resp_test",
-        object="response",
-        created_at=0.0,
-        model="gpt-test",
-        output=[
+    return _response_with_output(
+        [
             ResponseFunctionToolCall(
                 type="function_call",
                 call_id=call_id,
                 name=tool_name,
                 arguments=arguments,
             )
-        ],
-        parallel_tool_calls=False,
-        tool_choice="auto",
-        tools=[],
-        status="completed",
+        ]
     )
 
 
@@ -1504,6 +1502,42 @@ async def test_complete_parses_function_call_into_tool_call_part() -> None:
     # parsed into a dict
     assert result.message.parts == [
         ToolCallPart(call_id="call_1", tool_name="get_weather", args={"city": "Paris"})
+    ]
+
+
+async def test_complete_parses_parallel_function_calls() -> None:
+    """Two `function_call` items in one response decode into two
+    `ToolCallPart`s."""
+
+    # GIVEN a response carrying two function-call items
+    response = _response_with_output(
+        [
+            ResponseFunctionToolCall(
+                type="function_call",
+                call_id="call_1",
+                name="get_weather",
+                arguments='{"city": "Paris"}',
+            ),
+            ResponseFunctionToolCall(
+                type="function_call",
+                call_id="call_2",
+                name="get_weather",
+                arguments='{"city": "Berlin"}',
+            ),
+        ],
+        parallel_tool_calls=True,
+    )
+    provider = _provider(_mock_client_returning(response))
+
+    # WHEN `complete` is awaited
+    result = await provider.complete([UserMessage.from_text("weather?")], _settings())
+
+    # THEN both items decode, in order, each with its own id
+    assert result.message.parts == [
+        ToolCallPart(call_id="call_1", tool_name="get_weather", args={"city": "Paris"}),
+        ToolCallPart(
+            call_id="call_2", tool_name="get_weather", args={"city": "Berlin"}
+        ),
     ]
 
 
