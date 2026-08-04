@@ -26,6 +26,9 @@ how a caller should respond:
 For handling logic, catch a specific operational type, not the bare root.
 """
 
+from collections.abc import Callable
+from typing import Any, Self
+
 
 class AviorError(Exception):
     """Common root for every exception avior defines.
@@ -86,6 +89,35 @@ class ProviderHTTPError(ProviderError):
 
         super().__init__(message)
         self.status_code = status_code
+
+    def __reduce__(
+        self,
+    ) -> tuple[
+        Callable[[str, int], "ProviderHTTPError"], tuple[str, int], dict[str, Any]
+    ]:
+        """Support pickling despite the required keyword-only `status_code`.
+
+        Both pickle and the `copy` module reconstruct through this reduction.
+        The default `BaseException` reduction reconstructs an exception as
+        `class(*args)` and then applies `__dict__` as state; `args` carries
+        only the message, so the constructor call fails without `status_code`.
+        Reconstruction therefore goes through `_rebuild`, which passes both
+        the message and the status code; `__dict__` is still applied as
+        state, so notes and any attached attributes survive.
+        """
+
+        return (type(self)._rebuild, (self.args[0], self.status_code), self.__dict__)
+
+    @classmethod
+    def _rebuild(cls, message: str, status_code: int) -> Self:
+        """Reconstruct the exception when unpickling (see `__reduce__`).
+
+        A classmethod, so a pickled subclass is rebuilt as the subclass.  A
+        subclass that adds required constructor parameters must override
+        `_rebuild` (and `__reduce__`) to carry them.
+        """
+
+        return cls(message, status_code=status_code)
 
 
 class ProviderResponseValidationError(ProviderError):
