@@ -43,6 +43,11 @@ _OFF_BY_DEFAULT_MODEL = "gpt-5.1"
 # reasoning off.
 _ON_BY_DEFAULT_MODEL = "gpt-5.5"
 
+# An on-by-default model of the GPT-5.6 family.  Its test proves that
+# reasoning started by the model itself - with no thinking setting sent -
+# still round-trips across a tool call.
+_GPT_5_6_MODEL = "gpt-5.6"
+
 
 class _MagicNumberArgs(BaseModel):
     """Arguments for the `_MagicNumber` tool."""
@@ -195,6 +200,58 @@ async def test_runner_run_reasoning_tool_chain_against_openai(
 
     # AND the assistant turn carried a reasoning item (else the round-trip was
     # never exercised)
+    thinking_parts = [
+        part
+        for message in result.messages
+        if isinstance(message, AssistantMessage)
+        for part in message.parts
+        if isinstance(part, ThinkingPart)
+    ]
+    assert thinking_parts
+
+
+async def test_runner_run_default_reasoning_tool_chain_against_openai(
+    openai_responses_provider: OpenAIResponsesProvider,
+) -> None:
+    """Default-on reasoning round-trips across a tool call on GPT-5.6.
+
+    The GPT-5.6 family reasons without any thinking setting sent, but only
+    when the task warrants it - a trivial prompt yields no reasoning item at
+    all - so the prompt embeds a small puzzle the model must solve before it
+    can call the tool.  The request must be treated as reasoning-active:
+    encrypted reasoning content is requested, and the reasoning item is
+    replayed before its tool call on the continuation request.
+    """
+
+    # GIVEN a GPT-5.6 agent with no thinking setting, offered a tool whose
+    # result it cannot know
+    tool = _MagicNumber()
+    agent = Agent(
+        instructions=(
+            "When asked for a city's magic number, you must call the "
+            "get_magic_number tool, then state the number it returns."
+        ),
+        model_settings=ModelSettings(model=_GPT_5_6_MODEL, max_tokens=4096),
+        tools=[tool],
+    )
+
+    # WHEN `Runner.run` is awaited on a prompt whose city must be reasoned out
+    # before the tool call
+    result = await Runner(provider=openai_responses_provider).run(
+        agent,
+        "What is the magic number for the city whose name is an anagram of "
+        "'RIPSA'?  Check letter by letter that your candidate city uses "
+        "exactly these letters before calling the tool.",
+    )
+
+    # THEN the tool ran (the model derives the city itself, so its spelling
+    # may vary in case) and the final answer relays the tool's result, so the
+    # default-on reasoning item round-tripped through the tool loop
+    assert [city.lower() for city in tool.calls] == ["paris"]
+    assert "4242" in result.output
+
+    # AND the assistant turn carried a reasoning item, proving the model
+    # reasoned without being asked to
     thinking_parts = [
         part
         for message in result.messages

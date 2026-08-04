@@ -844,6 +844,32 @@ async def test_complete_raw_reasoning_none_overrides_portable_thinking() -> None
     assert result.warnings == []
 
 
+async def test_complete_raw_reasoning_reaches_max_effort_and_pro_mode() -> None:
+    """A raw `reasoning` option reaches values outside the portable levels.
+
+    `effort="max"` and `mode="pro"` have no portable counterpart; the raw
+    option validates against the installed OpenAI SDK types and is forwarded
+    verbatim.
+    """
+
+    # GIVEN settings with a raw `reasoning` option using `max` effort and
+    # `pro` mode
+    mock_client = _mock_client_returning(_response("ok"))
+    provider = _provider(mock_client)
+    settings = _settings(
+        model="gpt-5.6",
+        provider_options={"openai": {"reasoning": {"effort": "max", "mode": "pro"}}},
+    )
+
+    # WHEN `complete` is awaited
+    result = await provider.complete([UserMessage.from_text("hi")], settings)
+
+    # THEN the raw config is sent verbatim, with no warnings
+    create_kwargs = mock_client.responses.create.call_args.kwargs
+    assert create_kwargs["reasoning"] == {"effort": "max", "mode": "pro"}
+    assert result.warnings == []
+
+
 async def test_complete_requests_encrypted_reasoning_for_raw_option() -> None:
     """A raw `reasoning` option marks an unclassified model as a reasoning one.
 
@@ -1095,7 +1121,7 @@ async def test_complete_maps_usage_ids_and_model_onto_provider_response() -> Non
         input_tokens=11,
         output_tokens=7,
         total_tokens=18,
-        input_tokens_details=InputTokensDetails(cached_tokens=4),
+        input_tokens_details=InputTokensDetails(cached_tokens=4, cache_write_tokens=0),
         output_tokens_details=OutputTokensDetails(reasoning_tokens=3),
     )
     response = _response("hi", usage=usage)
@@ -1106,8 +1132,9 @@ async def test_complete_maps_usage_ids_and_model_onto_provider_response() -> Non
 
     # THEN usage is normalized: OpenAI's input/output already include their
     # cache/reasoning sub-slices, so the totals are used as-is and the nested
-    # details surface as sub-slices; cache_write is 0 (OpenAI has no separate
-    # cache-write counter); the derived total equals OpenAI's own reported total
+    # details surface as sub-slices; cache_write is 0 (avior does not map the
+    # OpenAI SDK's cache-write counter); the derived total equals OpenAI's own
+    # reported total
     # (confirming input/output already include their sub-slices)
     assert result.usage is not None
     assert result.usage.input_tokens == 11
@@ -1155,7 +1182,10 @@ async def test_complete_warns_when_provider_total_diverges_from_derived(
             input_tokens=11,
             output_tokens=7,
             total_tokens=42,  # inconsistent with 11 + 7
-            input_tokens_details=InputTokensDetails(cached_tokens=0),
+            input_tokens_details=InputTokensDetails(
+                cached_tokens=0,
+                cache_write_tokens=0,
+            ),
             output_tokens_details=OutputTokensDetails(reasoning_tokens=0),
         ),
     )

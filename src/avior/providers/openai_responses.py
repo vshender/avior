@@ -734,7 +734,8 @@ class OpenAIResponsesProvider(Provider):
 
         - `input_tokens` / `output_tokens`: used as-is.
         - `cache_read_tokens`: from `input_tokens_details.cached_tokens`.
-        - `cache_write_tokens`: `0` - OpenAI has no cache-write counter.
+        - `cache_write_tokens`: `0` - avior does not map the OpenAI SDK's
+          cache-write counter.
         - `reasoning_tokens`: from `output_tokens_details.reasoning_tokens`.
 
         avior's `total_tokens` is then derived (`input + output`) and equals
