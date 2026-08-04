@@ -1121,7 +1121,7 @@ async def test_complete_maps_usage_ids_and_model_onto_provider_response() -> Non
         input_tokens=11,
         output_tokens=7,
         total_tokens=18,
-        input_tokens_details=InputTokensDetails(cached_tokens=4, cache_write_tokens=0),
+        input_tokens_details=InputTokensDetails(cached_tokens=4, cache_write_tokens=5),
         output_tokens_details=OutputTokensDetails(reasoning_tokens=3),
     )
     response = _response("hi", usage=usage)
@@ -1132,16 +1132,14 @@ async def test_complete_maps_usage_ids_and_model_onto_provider_response() -> Non
 
     # THEN usage is normalized: OpenAI's input/output already include their
     # cache/reasoning sub-slices, so the totals are used as-is and the nested
-    # details surface as sub-slices; cache_write is 0 (avior does not map the
-    # OpenAI SDK's cache-write counter); the derived total equals OpenAI's own
-    # reported total
-    # (confirming input/output already include their sub-slices)
+    # details surface as sub-slices; the derived total equals OpenAI's own
+    # reported total (confirming input/output already include their sub-slices)
     assert result.usage is not None
     assert result.usage.input_tokens == 11
     assert result.usage.output_tokens == 7
     assert result.usage.reasoning_tokens == 3
     assert result.usage.cache_read_tokens == 4
-    assert result.usage.cache_write_tokens == 0
+    assert result.usage.cache_write_tokens == 5
     assert result.usage.total_tokens == 18
     assert result.usage.total_tokens == usage.total_tokens
 
@@ -1168,6 +1166,36 @@ async def test_complete_maps_absent_usage_to_none() -> None:
     # THEN usage and raw usage are both `None` (not a zero-filled `Usage`)
     assert result.usage is None
     assert result.raw_usage is None
+
+
+async def test_complete_coalesces_missing_cache_counters_to_zero() -> None:
+    """A usage payload without the cache counters maps them to zero.
+
+    The OpenAI SDK annotates the counters as `int` but builds response models
+    without validation, so a wire payload that omits them - an
+    OpenAI-compatible endpoint, or one predating a counter - yields `None` at
+    runtime.
+    """
+
+    # GIVEN a response whose usage details carry no cache counters
+    details = InputTokensDetails.construct()
+    usage = ResponseUsage(
+        input_tokens=11,
+        output_tokens=7,
+        total_tokens=18,
+        input_tokens_details=details,
+        output_tokens_details=OutputTokensDetails(reasoning_tokens=3),
+    )
+    response = _response("hi", usage=usage)
+    provider = _provider(_mock_client_returning(response))
+
+    # WHEN `complete` is awaited
+    result = await provider.complete([UserMessage.from_text("hi")], _settings())
+
+    # THEN both cache counts coalesce to zero instead of failing validation
+    assert result.usage is not None
+    assert result.usage.cache_read_tokens == 0
+    assert result.usage.cache_write_tokens == 0
 
 
 async def test_complete_warns_when_provider_total_diverges_from_derived(

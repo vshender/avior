@@ -85,7 +85,7 @@ class Usage(BaseModel):
     cache_write_tokens: int = Field(default=0, ge=0)
     """Sub-slice of `input_tokens` written to the prompt cache (cache creation).
     `0` when the provider reports no cache writes or has no separate write
-    accounting (e.g. OpenAI; Gemini cache creation is a separate call).
+    accounting (e.g. Gemini, whose cache creation is a separate call).
     """
 
     reasoning_tokens: int | None = Field(default=None, ge=0)

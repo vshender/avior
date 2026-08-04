@@ -734,8 +734,7 @@ class OpenAIResponsesProvider(Provider):
 
         - `input_tokens` / `output_tokens`: used as-is.
         - `cache_read_tokens`: from `input_tokens_details.cached_tokens`.
-        - `cache_write_tokens`: `0` - avior does not map the OpenAI SDK's
-          cache-write counter.
+        - `cache_write_tokens`: from `input_tokens_details.cache_write_tokens`.
         - `reasoning_tokens`: from `output_tokens_details.reasoning_tokens`.
 
         avior's `total_tokens` is then derived (`input + output`) and equals
@@ -745,10 +744,15 @@ class OpenAIResponsesProvider(Provider):
         if usage is None:
             return None
 
+        # The OpenAI SDK annotates both cache counters as `int` but builds
+        # response models without validation, so a wire payload that omits a
+        # counter - an OpenAI-compatible endpoint, or a payload predating the
+        # field - yields `None` at runtime; coalesce to the "no caching" zero.
         mapped = Usage(
             input_tokens=usage.input_tokens,
             output_tokens=usage.output_tokens,
-            cache_read_tokens=usage.input_tokens_details.cached_tokens,
+            cache_read_tokens=usage.input_tokens_details.cached_tokens or 0,
+            cache_write_tokens=usage.input_tokens_details.cache_write_tokens or 0,
             reasoning_tokens=usage.output_tokens_details.reasoning_tokens,
         )
 
