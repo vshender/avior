@@ -530,14 +530,14 @@ class OpenAIResponsesProvider(Provider):
             has_refusal=bool(refusal_parts),
             has_tool_call=any(isinstance(p, ToolCallPart) for p in parts),
         )
+        stop_detail: str | None = None
         if stop_reason == "error":
-            # The canonical `"error"` reason drops the provider-specific cause;
-            # log the status (and the provider's error message when present) so
-            # an abnormal finish stays diagnosable.
-            detail: str = response.status or "unknown status"
+            # The canonical `"error"` reason alone drops the provider-specific
+            # cause; carry the status (and the provider's error message when
+            # present) beside it so an abnormal finish stays diagnosable.
+            stop_detail = response.status or "unknown status"
             if response.error is not None:
-                detail = f"{detail}: {response.error.message}"
-            logger.warning("OpenAI finished abnormally: %s", detail)
+                stop_detail = f"{stop_detail}: {response.error.message}"
 
         raw_usage = (
             response.usage.model_dump(mode="json")
@@ -549,6 +549,7 @@ class OpenAIResponsesProvider(Provider):
             message=AssistantMessage(
                 parts=final_parts,
                 stop_reason=stop_reason,
+                stop_detail=stop_detail,
                 provider_name=self.name,
             ),
             usage=self._map_usage(response.usage),

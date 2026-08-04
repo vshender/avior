@@ -377,7 +377,8 @@ class Runner:
 
             case "error":
                 raise UnexpectedModelBehaviorError(
-                    "Model terminated abnormally without a usable response."
+                    "Model terminated abnormally without a usable response.",
+                    detail=message.stop_detail,
                 )
 
             case "stop" | "tool_use":

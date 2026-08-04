@@ -541,21 +541,23 @@ class GeminiProvider(Provider):
         if nameless_drove_error:
             stop_reason = "error"
 
+        stop_detail: str | None = None
         if stop_reason == "error":
-            # The canonical `"error"` reason drops the provider-specific cause;
-            # log it so an abnormal finish stays diagnosable.
+            # The canonical `"error"` reason alone drops the provider-specific
+            # cause; carry it beside the canonical value so an abnormal finish
+            # stays diagnosable.
             if nameless_drove_error:
-                reason = "a function call had no name"
+                stop_detail = "a function call had no name"
             elif candidate is None:
-                reason = "no candidate returned"
-            else:
-                reason = f"finish_reason={finish_reason}"
-            logger.warning("Gemini finished abnormally: %s", reason)
+                stop_detail = "no candidate returned"
+            elif finish_reason is not None:
+                stop_detail = finish_reason.name
 
         return ProviderResponse(
             message=AssistantMessage(
                 parts=parts,
                 stop_reason=stop_reason,
+                stop_detail=stop_detail,
                 provider_name=self.name,
             ),
             usage=self._map_usage(response.usage_metadata),

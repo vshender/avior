@@ -457,21 +457,31 @@ async def test_runner_run_raises_on_refusal_stop_reason() -> None:
 
 
 async def test_runner_run_raises_on_error_stop_reason() -> None:
-    """`Runner.run` raises `UnexpectedModelBehaviorError` on `"error"`."""
+    """`Runner.run` raises `UnexpectedModelBehaviorError` on `"error"`.
+
+    The diagnostic detail behind the canonical reason is carried on the
+    exception, both as the `detail` attribute and inside the message.
+    """
 
     # GIVEN an agent and a runner whose provider returns a message marked
-    # `error` (an abnormal termination, e.g. a malformed tool call)
+    # `error`, carrying the diagnostic detail behind the canonical reason
     agent = Agent(
         instructions="you are helpful",
         model_settings=ModelSettings(model="test-model"),
     )
-    errored = AssistantMessage(parts=[], stop_reason="error")
-    runner = Runner(provider=StubProvider.from_responses([errored]))
+    errored_message = AssistantMessage(
+        parts=[],
+        stop_reason="error",
+        stop_detail="MALFORMED_FUNCTION_CALL",
+    )
+    runner = Runner(provider=StubProvider.from_responses([errored_message]))
 
     # WHEN `Runner.run` is invoked
-    # THEN it raises `UnexpectedModelBehaviorError`
-    with pytest.raises(UnexpectedModelBehaviorError):
+    # THEN it raises `UnexpectedModelBehaviorError` carrying the detail
+    with pytest.raises(UnexpectedModelBehaviorError) as exc_info:
         await runner.run(agent, "hello")
+    assert exc_info.value.detail == "MALFORMED_FUNCTION_CALL"
+    assert "MALFORMED_FUNCTION_CALL" in str(exc_info.value)
 
 
 async def test_runner_run_accepts_normal_stop_reason() -> None:

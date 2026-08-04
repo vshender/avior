@@ -342,9 +342,11 @@ async def test_complete_maps_no_candidates_to_error() -> None:
     # WHEN `complete` is awaited
     result = await provider.complete([UserMessage.from_text("hi")], _settings())
 
-    # THEN the stop reason is `"error"` (with no content)
+    # THEN the stop reason is `"error"` (with no content), with the missing
+    # candidate carried as the detail behind it
     assert result.message.parts == []
     assert result.message.stop_reason == "error"
+    assert result.message.stop_detail == "no candidate returned"
 
 
 async def test_complete_decodes_thought_part_into_thinking_part() -> None:
@@ -665,8 +667,10 @@ async def test_complete_maps_malformed_function_call_to_error() -> None:
     # WHEN `complete` is awaited
     result = await provider.complete([UserMessage.from_text("hi")], _settings())
 
-    # THEN the canonical `stop_reason` is `"error"`, not a successful `"stop"`
+    # THEN the canonical `stop_reason` is `"error"`, not a successful `"stop"`,
+    # with the raw finish reason carried as the detail behind it
     assert result.message.stop_reason == "error"
+    assert result.message.stop_detail == "MALFORMED_FUNCTION_CALL"
 
 
 async def test_complete_maps_unexpected_tool_call_to_error() -> None:
@@ -999,8 +1003,10 @@ async def test_complete_maps_nameless_function_call_to_error() -> None:
     # WHEN `complete` is awaited
     result = await provider.complete([UserMessage.from_text("weather?")], _settings())
 
-    # THEN the stop reason is `"error"` and the nameless call is dropped
+    # THEN the stop reason is `"error"` with the cause carried as the detail
+    # behind it, and the nameless call is dropped
     assert result.message.stop_reason == "error"
+    assert result.message.stop_detail == "a function call had no name"
     assert result.message.parts == []
 
 

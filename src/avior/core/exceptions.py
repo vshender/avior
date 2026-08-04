@@ -187,9 +187,21 @@ class UnexpectedModelBehaviorError(AgentRunError):
 
     Distinct from `ContentFilterError` / `ModelRefusalError`, which are specific
     deliberate outcomes; this is the catch-all for "the model misbehaved".  The
-    provider-specific reason is not carried on the canonical stop reason; a
-    provider may log it.
+    diagnostic detail behind the canonical reason - when there is one - is
+    preserved on `detail` for logging and inspection.
     """
+
+    detail: str | None
+    """The diagnostic detail behind the canonical `"error"` stop reason
+    (`AssistantMessage.stop_detail`), or `None` when there is none."""
+
+    def __init__(self, message: str, *, detail: str | None = None) -> None:
+        """Initialize with `message`, folding `detail` into it when present."""
+
+        if detail is not None:
+            message = f"{message} Provider detail: {detail}"
+        super().__init__(message)
+        self.detail = detail
 
 
 class AviorUsageError(AviorError):

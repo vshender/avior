@@ -271,6 +271,16 @@ class AssistantMessage(BaseModel):
     adapters when building the message from a provider response.
     """
 
+    stop_detail: str | None = None
+    """Diagnostic detail behind `stop_reason`, or `None` when the adapter has
+    no extra detail to add.
+
+    The raw provider finish value where one exists (for example a Gemini
+    `finish_reason` name), otherwise the adapter's own description of a fault
+    it detected itself.  Diagnostic only: branch on `stop_reason`, never on
+    this field.
+    """
+
     provider_name: str | None = None
     """Name of the provider that produced this turn, or `None` for a turn built
     by hand rather than by a provider.  A turn replayed from a stored transcript

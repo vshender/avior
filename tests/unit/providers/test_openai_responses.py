@@ -16,6 +16,7 @@ from openai import (
 )
 from openai.types.responses import (
     Response,
+    ResponseError,
     ResponseFunctionToolCall,
     ResponseFunctionWebSearch,
     ResponseOutputItem,
@@ -143,8 +144,12 @@ def _incomplete_response(
 
 def _status_response(
     status: Literal["failed", "cancelled", "queued", "in_progress"],
+    error: ResponseError | None = None,
 ) -> Response:
-    """Build an empty `Response` with the given status."""
+    """Build an empty `Response` with the given status.
+
+    Pass `error` to attach the provider's error payload (default: none).
+    """
 
     return Response(
         id="resp_test",
@@ -156,6 +161,7 @@ def _status_response(
         tool_choice="auto",
         tools=[],
         status=status,
+        error=error,
     )
 
 
@@ -1422,8 +1428,27 @@ async def test_complete_maps_abnormal_status_to_error(
     # WHEN `complete` is awaited
     result = await provider.complete([UserMessage.from_text("hi")], _settings())
 
-    # THEN the canonical `stop_reason` is `"error"`, not `"stop"`
+    # THEN the canonical `stop_reason` is `"error"`, not `"stop"`, and the
+    # provider's status is carried as the detail behind it
     assert result.message.stop_reason == "error"
+    assert result.message.stop_detail == status
+
+
+async def test_complete_carries_provider_error_message_in_stop_detail() -> None:
+    """A failed response's provider error message is carried in
+    `stop_detail`."""
+
+    # GIVEN a failed response carrying the provider's error payload
+    error = ResponseError(code="server_error", message="internal failure")
+    response = _status_response("failed", error=error)
+    provider = _provider(_mock_client_returning(response))
+
+    # WHEN `complete` is awaited
+    result = await provider.complete([UserMessage.from_text("hi")], _settings())
+
+    # THEN the detail combines the status with the provider's error message
+    assert result.message.stop_reason == "error"
+    assert result.message.stop_detail == "failed: internal failure"
 
 
 async def test_complete_maps_refusal_content_part_to_refusal_stop_reason() -> None:
