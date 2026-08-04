@@ -19,6 +19,7 @@ from avior.core.messages import (
     AssistantMessage,
     Message,
     TextPart,
+    ThinkingPart,
     ToolCallPart,
     ToolMessage,
     ToolResultOk,
@@ -336,6 +337,31 @@ async def test_runner_run_raises_on_empty_response() -> None:
     )
     empty_response = AssistantMessage(parts=[], stop_reason="stop")
     runner = Runner(provider=StubProvider.from_responses([empty_response]))
+
+    # WHEN `Runner.run` is invoked
+    # THEN it raises `UnexpectedModelBehaviorError`
+    with pytest.raises(UnexpectedModelBehaviorError):
+        await runner.run(agent, "hello")
+
+
+async def test_runner_run_raises_on_thinking_only_response() -> None:
+    """`Runner.run` raises `UnexpectedModelBehaviorError` on thinking alone.
+
+    A final turn of only reasoning parts is not an answer; the run would
+    otherwise end with an empty `output` that reads as success.
+    """
+
+    # GIVEN an agent and a runner whose provider replies with an assistant
+    # message carrying only a thinking part
+    agent = Agent(
+        instructions="you are helpful",
+        model_settings=ModelSettings(model="test-model"),
+    )
+    thinking_only_response = AssistantMessage(
+        parts=[ThinkingPart(content="reasoning that never became an answer")],
+        stop_reason="stop",
+    )
+    runner = Runner(provider=StubProvider.from_responses([thinking_only_response]))
 
     # WHEN `Runner.run` is invoked
     # THEN it raises `UnexpectedModelBehaviorError`

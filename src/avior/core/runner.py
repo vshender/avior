@@ -23,6 +23,7 @@ from avior.core.exceptions import (
 from avior.core.messages import (
     AssistantMessage,
     Message,
+    TextPart,
     ToolCallPart,
     ToolMessage,
     ToolResultPart,
@@ -166,7 +167,7 @@ class Runner:
             ModelRefusalError: The model itself declined to answer.
             UnexpectedModelBehaviorError: The model terminated abnormally
                 without a usable response - the `"error"` stop reason, or a
-                response with no content (no text and no tool calls).
+                response with neither text nor tool calls.
             MaxIterationsExceeded: The loop hit `max_iter` without finishing.
             Exception: A warning handler that raises aborts the run; its
                 exception propagates unchanged.
@@ -246,13 +247,14 @@ class Runner:
 
             self._raise_for_error_stop(message, agent.model_settings)
 
-            if not message.parts:
-                # The model produced no content at all - no text and no tool
-                # calls.  That is a degenerate response, not a usable answer, so
-                # surface it rather than returning an empty result that hides a
-                # provider glitch.
+            if not any(isinstance(p, (TextPart, ToolCallPart)) for p in message.parts):
+                # The model produced no text and no tool calls - at most
+                # reasoning parts, which are not an answer.  Surface it rather
+                # than returning an empty result that reads as success.  A
+                # present but empty text part still counts as an answer: the
+                # guard checks response shape, not text content.
                 raise UnexpectedModelBehaviorError(
-                    "The model returned an empty response with no content."
+                    "The model returned a response with neither text nor tool calls."
                 )
 
             generated.append(message)
