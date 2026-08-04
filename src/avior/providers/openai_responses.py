@@ -13,7 +13,7 @@ Install via the optional extra: `pip install avior[openai]`.
 import json
 import logging
 from collections.abc import Sequence
-from typing import Any, Literal, TypedDict, assert_never
+from typing import Any, Literal, TypedDict, assert_never, cast
 
 from pydantic import ConfigDict, JsonValue, TypeAdapter
 
@@ -38,6 +38,10 @@ try:
         ResponseUsage,
     )
     from openai.types.responses.response_input_item_param import FunctionCallOutput
+    from openai.types.responses.response_usage import (
+        InputTokensDetails,
+        OutputTokensDetails,
+    )
     from openai.types.shared_params import Reasoning
 except ImportError as e:
     raise ImportError(
@@ -744,16 +748,29 @@ class OpenAIResponsesProvider(Provider):
         if usage is None:
             return None
 
-        # The OpenAI SDK annotates both cache counters as `int` but builds
-        # response models without validation, so a wire payload that omits a
-        # counter - an OpenAI-compatible endpoint, or a payload predating the
-        # field - yields `None` at runtime; coalesce to the "no caching" zero.
+        # The OpenAI SDK annotates the usage detail objects and both cache
+        # counters as required, but builds response models without validation,
+        # so a wire payload that omits any of them - an OpenAI-compatible
+        # endpoint, or a payload predating a field - yields `None` at runtime.
+        # The `cast`s widen the SDK's declared types to what actually arrives
+        # (a plain `| None` annotation would not survive the type checker's
+        # assignment narrowing).  An absent cache count genuinely means zero;
+        # absent output details leave the reasoning breakdown unknown.
+        input_details = cast(InputTokensDetails | None, usage.input_tokens_details)
+        output_details = cast(OutputTokensDetails | None, usage.output_tokens_details)
+        cache_read = input_details.cached_tokens if input_details is not None else None
+        cache_write = (
+            input_details.cache_write_tokens if input_details is not None else None
+        )
+        reasoning = (
+            output_details.reasoning_tokens if output_details is not None else None
+        )
         mapped = Usage(
             input_tokens=usage.input_tokens,
             output_tokens=usage.output_tokens,
-            cache_read_tokens=usage.input_tokens_details.cached_tokens or 0,
-            cache_write_tokens=usage.input_tokens_details.cache_write_tokens or 0,
-            reasoning_tokens=usage.output_tokens_details.reasoning_tokens,
+            cache_read_tokens=cache_read or 0,
+            cache_write_tokens=cache_write or 0,
+            reasoning_tokens=reasoning,
         )
 
         # OpenAI reports its own total, which should match the total our mapped

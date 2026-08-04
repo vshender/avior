@@ -1198,6 +1198,30 @@ async def test_complete_coalesces_missing_cache_counters_to_zero() -> None:
     assert result.usage.cache_write_tokens == 0
 
 
+async def test_complete_tolerates_missing_usage_detail_objects() -> None:
+    """A usage payload without the detail objects maps to zero cache counts
+    and unknown reasoning.
+
+    The OpenAI SDK annotates `input_tokens_details` / `output_tokens_details`
+    as required but builds response models without validation, so a wire
+    payload omitting them leaves both as `None` at runtime.
+    """
+
+    # GIVEN a response whose usage carries no detail objects
+    usage = ResponseUsage.construct(input_tokens=11, output_tokens=7, total_tokens=18)
+    response = _response("hi", usage=usage)
+    provider = _provider(_mock_client_returning(response))
+
+    # WHEN `complete` is awaited
+    result = await provider.complete([UserMessage.from_text("hi")], _settings())
+
+    # THEN the cache counts read zero and the reasoning breakdown is unknown
+    assert result.usage is not None
+    assert result.usage.cache_read_tokens == 0
+    assert result.usage.cache_write_tokens == 0
+    assert result.usage.reasoning_tokens is None
+
+
 async def test_complete_warns_when_provider_total_diverges_from_derived(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
