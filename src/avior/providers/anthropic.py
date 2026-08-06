@@ -763,7 +763,9 @@ class AnthropicProvider(Provider):
 
         Maps each message type to Anthropic's wire shape:
 
-        - `UserMessage` -> a `user` turn of text blocks.
+        - `UserMessage` -> a `user` turn of text blocks, one per non-empty
+          part.  An empty part carries nothing to encode and is skipped; a
+          turn with no content at all is rejected instead (see `Raises`).
         - `AssistantMessage` -> an `assistant` turn; text parts become text
           blocks and tool calls become `tool_use` blocks.  A reasoning step is
           echoed back unchanged as a `thinking` / `redacted_thinking` block when
@@ -786,7 +788,9 @@ class AnthropicProvider(Provider):
             case UserMessage():
                 reject_empty_user_turn(message)
                 user_content: list[TextBlockParam] = [
-                    TextBlockParam(type="text", text=p.text) for p in message.parts
+                    TextBlockParam(type="text", text=p.text)
+                    for p in message.parts
+                    if p.text
                 ]
                 return MessageParam(role="user", content=user_content)
 

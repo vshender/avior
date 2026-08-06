@@ -348,7 +348,34 @@ async def test_complete_sends_system_prompt_as_instructions() -> None:
     assert call_kwargs["instructions"] == "be helpful"
     assert len(call_kwargs["input"]) == 1
     assert call_kwargs["input"][0]["role"] == "user"
-    assert call_kwargs["input"][0]["content"] == "hello"
+    assert call_kwargs["input"][0]["content"] == [
+        {"type": "input_text", "text": "hello"}
+    ]
+
+
+async def test_complete_encodes_an_input_text_item_per_nonempty_user_part() -> None:
+    """A multi-part user message encodes as one `input_text` item per
+    non-empty part, in part order; an empty part is skipped.
+    """
+
+    # GIVEN a mock client and a user message of two text parts with an empty
+    # part between them
+    mock_client = _mock_client_returning(_response("ok"))
+    provider = _provider(mock_client)
+    user_message = UserMessage(
+        parts=[TextPart(text="first"), TextPart(text=""), TextPart(text="second")]
+    )
+
+    # WHEN `complete` is invoked with the three-part message
+    await provider.complete([user_message], _settings())
+
+    # THEN the wire content is a list of the two non-empty `input_text`
+    # items, in order
+    wire_input = mock_client.responses.create.call_args.kwargs["input"]
+    assert wire_input[0]["content"] == [
+        {"type": "input_text", "text": "first"},
+        {"type": "input_text", "text": "second"},
+    ]
 
 
 async def test_complete_omits_system_prompt_when_none() -> None:

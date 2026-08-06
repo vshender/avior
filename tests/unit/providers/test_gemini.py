@@ -1056,6 +1056,28 @@ async def test_complete_rejects_an_empty_user_turn(
     mock_client.aio.models.generate_content.assert_not_awaited()
 
 
+async def test_complete_encodes_a_text_part_per_nonempty_user_part() -> None:
+    """A multi-part user message encodes as one text part per non-empty
+    part, in part order; an empty part is skipped.
+    """
+
+    # GIVEN a mock client and a user message of two text parts with an empty
+    # part between them
+    mock_client = _mock_client_returning(_text("ok"))
+    provider = _provider(mock_client)
+    user_message = UserMessage(
+        parts=[TextPart(text="first"), TextPart(text=""), TextPart(text="second")]
+    )
+
+    # WHEN `complete` is invoked with the three-part message
+    await provider.complete([user_message], _settings())
+
+    # THEN the user content carries the two non-empty text parts, in order
+    contents = _call_contents(mock_client)
+    assert contents[0].parts is not None
+    assert [p.text for p in contents[0].parts] == ["first", "second"]
+
+
 async def test_complete_sends_tools_with_name_description_and_schema() -> None:
     """Each offered tool is sent as a function declaration with its schema."""
 

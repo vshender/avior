@@ -31,6 +31,7 @@ try:
         ResponseIncludable,
         ResponseInputItemParam,
         ResponseInputParam,
+        ResponseInputTextParam,
         ResponseOutputMessage,
         ResponseOutputRefusal,
         ResponseOutputText,
@@ -1008,7 +1009,10 @@ class OpenAIResponsesProvider(Provider):
         API carries reasoning, tool calls, and tool results as their own
         top-level items rather than nested in a message:
 
-        - `UserMessage` -> a single `user` message item.
+        - `UserMessage` -> a single `user` message item of `input_text`
+          parts, one per non-empty part.  An empty part carries nothing to
+          encode and is skipped; a turn with no content at all is rejected
+          instead (see `Raises`).
         - `AssistantMessage` -> its parts, in order, each mapped to a wire item:
 
           - a text part -> a `message` item;
@@ -1036,7 +1040,11 @@ class OpenAIResponsesProvider(Provider):
                     EasyInputMessageParam(
                         role="user",
                         type="message",
-                        content=message.text or "",
+                        content=[
+                            ResponseInputTextParam(type="input_text", text=p.text)
+                            for p in message.parts
+                            if p.text
+                        ],
                     )
                 ]
 

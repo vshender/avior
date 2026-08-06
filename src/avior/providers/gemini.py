@@ -894,7 +894,9 @@ class GeminiProvider(Provider):
 
         Maps each message type to Gemini's wire shape:
 
-        - `UserMessage` -> a `"user"` turn of text parts.
+        - `UserMessage` -> a `"user"` turn of text parts, one per non-empty
+          part.  An empty part carries nothing to encode and is skipped; a
+          turn with no content at all is rejected instead (see `Raises`).
         - `AssistantMessage` -> a `"model"` turn; text parts become text parts,
           tool calls become `function_call` parts, and a reasoning step whose
           `provider_details` carry a thought signature becomes a thought part.
@@ -935,7 +937,7 @@ class GeminiProvider(Provider):
                 reject_empty_user_turn(message)
                 return types.Content(
                     role="user",
-                    parts=[types.Part(text=p.text) for p in message.parts],
+                    parts=[types.Part(text=p.text) for p in message.parts if p.text],
                 )
 
             case AssistantMessage():

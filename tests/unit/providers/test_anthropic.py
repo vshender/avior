@@ -294,6 +294,30 @@ async def test_complete_sends_system_prompt_as_top_level_block() -> None:
     assert call_kwargs["messages"][0]["content"] == [{"type": "text", "text": "hello"}]
 
 
+async def test_complete_encodes_a_text_block_per_nonempty_user_part() -> None:
+    """A multi-part user message encodes as one text block per non-empty
+    part, in part order; an empty part is skipped.
+    """
+
+    # GIVEN a mock client and a user message of two text parts with an empty
+    # part between them
+    mock_client = _mock_client_returning(_response("ok"))
+    provider = _provider(mock_client)
+    user_message = UserMessage(
+        parts=[TextPart(text="first"), TextPart(text=""), TextPart(text="second")]
+    )
+
+    # WHEN `complete` is invoked with the three-part message
+    await provider.complete([user_message], _settings())
+
+    # THEN the wire content is a list of the two non-empty text blocks, in order
+    call_kwargs = mock_client.messages.create.call_args.kwargs
+    assert call_kwargs["messages"][0]["content"] == [
+        {"type": "text", "text": "first"},
+        {"type": "text", "text": "second"},
+    ]
+
+
 async def test_complete_omits_system_prompt_when_none() -> None:
     """`complete` passes `omit` when `system_prompt` is `None`."""
 
