@@ -26,6 +26,7 @@ except ImportError as e:
 
 from avior.core.exceptions import (
     AviorUsageError,
+    EmptyInputError,
     ProviderConnectionError,
     ProviderHTTPError,
     ProviderResponseValidationError,
@@ -352,6 +353,8 @@ class GeminiProvider(Provider):
             the call metadata.
 
         Raises:
+            EmptyInputError: The transcript has a user message with no content
+                (`UserMessage.is_empty`); raised before the request is sent.
             AviorUsageError: The `gemini` `provider_options` slice is invalid
                 (an unknown key or a value of the wrong type), or a transcript
                 part carries a corrupted `thought_signature`; raised before
@@ -365,13 +368,13 @@ class GeminiProvider(Provider):
             ProviderConnectionError: Network-level failure (DNS / TCP / TLS /
                 timeout) - no HTTP response was received.
 
-        These are the known Gemini SDK failures the adapter translates; each
-        derives from `ProviderError` and preserves the original Gemini SDK
-        exception as `__cause__`.  The SDK exposes no single base exception to
-        catch as a catch-all, so an unrecognized SDK error propagates
-        untranslated rather than being masked by an over-broad `except`.
-        (An abnormal terminal finish is not raised here - it becomes the
-        `"error"` stop reason; see `_map_stop_reason`.)
+        Errors translated from a Gemini SDK exception preserve it as
+        `__cause__`; validation errors avior detects in an otherwise
+        successful response are raised directly.  The Gemini SDK exposes no
+        single base exception to catch as a catch-all, so an unrecognized SDK
+        error propagates untranslated rather than being masked by an
+        over-broad `except`.  (An abnormal terminal finish is not raised
+        here - it becomes the `"error"` stop reason; see `_map_stop_reason`.)
         """
 
         logger.debug("complete: model=%s, messages=%d", settings.model, len(messages))
@@ -937,10 +940,20 @@ class GeminiProvider(Provider):
         reasoning steps, none of them echoable): it would serialize to an empty
         turn, which carries nothing for the model, so it is omitted from the
         request.
+
+        Raises:
+            EmptyInputError: The message is an empty user turn
+                (`UserMessage.is_empty`).  There is no content to encode, so
+                the message is rejected as a caller mistake before the
+                request is sent.
         """
 
         match message:
             case UserMessage():
+                if message.is_empty:
+                    raise EmptyInputError(
+                        "The transcript has a user message with no content to send."
+                    )
                 return types.Content(
                     role="user",
                     parts=[types.Part(text=p.text) for p in message.parts],

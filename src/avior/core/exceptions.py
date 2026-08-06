@@ -263,14 +263,15 @@ class MissingDependenciesError(AviorUsageError):
 
 
 class InvalidInputError(AviorUsageError):
-    """Run input that violates avior's input contract.
+    """Input that violates avior's input contract.
 
     A caller-side mistake in the input itself, independent of any model API.
-    `Runner.run` raises this before the first model call, so the mistake
-    surfaces at the call site as a clear avior error rather than reaching the
-    model, where the same fault might fail opaquely on one backend or be
-    silently accepted as a meaningless run on another.  The fix is in the
-    caller's code: validate the input before calling `Runner.run`.
+    The fault is detectable from the input alone, so it is raised before any
+    request is sent - the mistake surfaces at the call site as a clear avior
+    error rather than reaching the model, where the same fault might fail
+    opaquely on one backend or be silently accepted as a meaningless run on
+    another.  The fix is in the caller's code: validate the input before
+    handing it to avior.
 
     avior checks only faults that hold regardless of the model API; how each
     model API constrains transcript shape (role ordering, alternation) is
@@ -279,11 +280,11 @@ class InvalidInputError(AviorUsageError):
 
 
 class EmptyInputError(InvalidInputError):
-    """The run input carries no content for the model.
+    """The input carries no content for the model.
 
-    No messages at all (an empty list), or a message empty of content - a user
-    turn with no non-whitespace text, or an assistant or tool turn with no
-    parts.  avior requires every run to hand the model something to act on, and
+    No messages at all (an empty list), or a message empty of content - an empty
+    user turn (`UserMessage.is_empty`), or an assistant or tool turn with no
+    parts.  avior requires the caller to hand the model something to act on, and
     rejects empty input as a caller mistake rather than forwarding it.
     """
 

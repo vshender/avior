@@ -29,6 +29,7 @@ from pydantic import BaseModel
 from avior.core.context import RunContext
 from avior.core.exceptions import (
     AviorUsageError,
+    EmptyInputError,
     ProviderConnectionError,
     ProviderError,
     ProviderHTTPError,
@@ -411,6 +412,33 @@ async def test_complete_raises_on_unsupported_content_block() -> None:
     # THEN `ProviderResponseValidationError` is raised
     with pytest.raises(ProviderResponseValidationError):
         await provider.complete([UserMessage.from_text("hi")], _settings())
+
+
+@pytest.mark.parametrize(
+    "empty_user_message",
+    [
+        pytest.param(UserMessage(parts=[]), id="no-parts"),
+        pytest.param(UserMessage.from_text("   "), id="whitespace-only"),
+    ],
+)
+async def test_complete_rejects_an_empty_user_turn(
+    empty_user_message: UserMessage,
+) -> None:
+    """A user message carrying no content (`UserMessage.is_empty`) is a caller
+    fault: `complete` raises `EmptyInputError` and never sends the request.
+    """
+
+    # GIVEN a provider over a mock client, and a transcript with a contentful
+    # user message followed by the empty one
+    mock_client = AsyncMock()
+    provider = _provider(mock_client)
+    transcript = [UserMessage.from_text("hi"), empty_user_message]
+
+    # WHEN `complete` is invoked with that transcript
+    # THEN `EmptyInputError` is raised, and no request is sent
+    with pytest.raises(EmptyInputError):
+        await provider.complete(transcript, _settings())
+    mock_client.messages.create.assert_not_awaited()
 
 
 # Call-metadata mapping tests

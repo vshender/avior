@@ -51,6 +51,7 @@ except ImportError as e:
     ) from e
 
 from avior.core.exceptions import (
+    EmptyInputError,
     ProviderConnectionError,
     ProviderError,
     ProviderHTTPError,
@@ -432,8 +433,10 @@ class OpenAIResponsesProvider(Provider):
             the call metadata.
 
         Raises:
+            EmptyInputError: The transcript has a user message with no content
+                (`UserMessage.is_empty`); raised before the request is sent.
             AviorUsageError: The `openai` `provider_options` slice is invalid
-                (an unknown key or a value of the wrong type), raised before
+                (an unknown key or a value of the wrong type); raised before
                 the request is sent.
             ProviderHTTPError: The provider returned a 4xx or 5xx HTTP response.
                 `status_code` carries the wire status.
@@ -1043,10 +1046,20 @@ class OpenAIResponsesProvider(Provider):
           to its call by `call_id`.  The Responses API has no error flag on a
           tool output, so an error result is sent as its text content (the
           status distinction is carried only in that text).
+
+        Raises:
+            EmptyInputError: The message is an empty user turn
+                (`UserMessage.is_empty`).  There is no content to encode, so
+                the message is rejected as a caller mistake before the
+                request is sent.
         """
 
         match message:
             case UserMessage():
+                if message.is_empty:
+                    raise EmptyInputError(
+                        "The transcript has a user message with no content to send."
+                    )
                 return [
                     EasyInputMessageParam(
                         role="user",

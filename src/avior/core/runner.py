@@ -339,7 +339,7 @@ class Runner:
 
         match message:
             case UserMessage():
-                return not (message.text or "").strip()
+                return message.is_empty
             case AssistantMessage() | ToolMessage():
                 return not message.parts
             case _:

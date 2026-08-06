@@ -255,6 +255,18 @@ class UserMessage(BaseModel):
 
         return "".join(p.text for p in self.parts) if self.parts else None
 
+    @property
+    def is_empty(self) -> bool:
+        """Whether the message carries no content to send.
+
+        `True` when there are no parts, or when the concatenated part text is
+        empty or whitespace-only.  This is the emptiness rule for a user
+        turn: input validation rejects a message this property marks as empty
+        with `EmptyInputError`.
+        """
+
+        return not (self.text or "").strip()
+
 
 class AssistantMessage(BaseModel):
     """An `assistant`-role turn produced by a model."""

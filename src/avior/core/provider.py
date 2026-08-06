@@ -239,6 +239,10 @@ class Provider(ABC):
             A `ProviderResponse` carrying the assistant message and the
             call metadata.
 
+        Raises:
+            EmptyInputError: The transcript has a user message with no content
+                (`UserMessage.is_empty`); raised before the request is sent.
+
         Fault handling is split by class, uniformly across adapters:
 
         - An *unrepresentable response* raises `ProviderResponseValidationError`
