@@ -42,7 +42,6 @@ except ImportError as e:
     ) from e
 
 from avior.core.exceptions import (
-    EmptyInputError,
     ProviderConnectionError,
     ProviderError,
     ProviderHTTPError,
@@ -68,7 +67,12 @@ from avior.core.provider import (
 )
 from avior.core.tools import Tool
 from avior.core.usage import Usage
-from avior.core.warnings import RunWarning, UnsupportedSettingRunWarning
+from avior.core.warnings import RunWarning
+from avior.providers._shared import (
+    reject_empty_user_turn,
+    sampling_dropped,
+    thinking_dropped,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -640,7 +644,8 @@ class AnthropicProvider(Provider):
             # harmless no-op.
             if thinking is not False:
                 warnings.append(
-                    self._thinking_dropped(
+                    thinking_dropped(
+                        self.name,
                         settings,
                         "the model is not a recognized thinking model; if it "
                         "does think, configure thinking via the `anthropic` "
@@ -652,7 +657,8 @@ class AnthropicProvider(Provider):
         elif thinking is False:
             if mode == "always_on":
                 warnings.append(
-                    self._thinking_dropped(
+                    thinking_dropped(
+                        self.name,
                         settings,
                         "the model's thinking is always on and cannot be disabled",
                     )
@@ -665,7 +671,8 @@ class AnthropicProvider(Provider):
             budget = _THINKING_BUDGET_TOKENS[thinking]
             if settings.max_tokens is not None and budget >= settings.max_tokens:
                 warnings.append(
-                    self._thinking_dropped(
+                    thinking_dropped(
+                        self.name,
                         settings,
                         f"the thinking budget of {budget} tokens does not fit "
                         f"max_tokens={settings.max_tokens}",
@@ -736,43 +743,10 @@ class AnthropicProvider(Provider):
                 if no_custom_sampling
                 else "a custom temperature is not accepted while thinking is active"
             )
-            warnings.append(self._sampling_dropped(settings, reason))
+            warnings.append(sampling_dropped(self.name, settings, reason))
             return omit
 
         return temperature
-
-    def _thinking_dropped(
-        self,
-        settings: ModelSettings,
-        reason: str | None = None,
-    ) -> UnsupportedSettingRunWarning:
-        """Build the warning for a `thinking` request that was dropped.
-
-        `reason` is an optional standalone explanation of why the request could
-        not be honored; it is `None` when the generic message already says
-        enough.
-        """
-
-        return UnsupportedSettingRunWarning(
-            setting_name="thinking",
-            setting_value=settings.thinking,
-            reason=reason,
-            provider=self.name,
-            model=settings.model,
-        )
-
-    def _sampling_dropped(
-        self, settings: ModelSettings, reason: str
-    ) -> UnsupportedSettingRunWarning:
-        """Build the warning for a `temperature` that was dropped."""
-
-        return UnsupportedSettingRunWarning(
-            setting_name="temperature",
-            setting_value=settings.temperature,
-            reason=reason,
-            provider=self.name,
-            model=settings.model,
-        )
 
     @staticmethod
     def _to_tool_param(tool: Tool[Any, Any, Any]) -> ToolParam:
@@ -810,10 +784,7 @@ class AnthropicProvider(Provider):
 
         match message:
             case UserMessage():
-                if message.is_empty:
-                    raise EmptyInputError(
-                        "The transcript has a user message with no content to send."
-                    )
+                reject_empty_user_turn(message)
                 user_content: list[TextBlockParam] = [
                     TextBlockParam(type="text", text=p.text) for p in message.parts
                 ]

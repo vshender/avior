@@ -26,7 +26,6 @@ except ImportError as e:
 
 from avior.core.exceptions import (
     AviorUsageError,
-    EmptyInputError,
     ProviderConnectionError,
     ProviderHTTPError,
     ProviderResponseValidationError,
@@ -51,7 +50,8 @@ from avior.core.provider import (
 )
 from avior.core.tools import Tool
 from avior.core.usage import Usage
-from avior.core.warnings import RunWarning, UnsupportedSettingRunWarning
+from avior.core.warnings import RunWarning
+from avior.providers._shared import reject_empty_user_turn, thinking_dropped
 
 logger = logging.getLogger(__name__)
 
@@ -791,7 +791,8 @@ class GeminiProvider(Provider):
             # (`False`) is a harmless no-op.
             if thinking is not False:
                 warnings.append(
-                    self._thinking_dropped(
+                    thinking_dropped(
+                        self.name,
                         settings,
                         "the model is not a recognized thinking model; if it "
                         "does think, configure thinking via the `gemini` "
@@ -817,7 +818,8 @@ class GeminiProvider(Provider):
                             assert_never(shape)
                 case "always_on":
                     warnings.append(
-                        self._thinking_dropped(
+                        thinking_dropped(
+                            self.name,
                             settings,
                             "the model's thinking is always on and cannot be disabled",
                         )
@@ -858,26 +860,6 @@ class GeminiProvider(Provider):
                     )
                 case _:
                     assert_never(shape)
-
-    def _thinking_dropped(
-        self,
-        settings: ModelSettings,
-        reason: str | None = None,
-    ) -> UnsupportedSettingRunWarning:
-        """Build the warning for a `thinking` request that was dropped.
-
-        `reason` is an optional standalone explanation of why the request could
-        not be honored; it is `None` when the generic message already says
-        enough.
-        """
-
-        return UnsupportedSettingRunWarning(
-            setting_name="thinking",
-            setting_value=settings.thinking,
-            reason=reason,
-            provider=self.name,
-            model=settings.model,
-        )
 
     @staticmethod
     def _to_function_declaration(
@@ -950,10 +932,7 @@ class GeminiProvider(Provider):
 
         match message:
             case UserMessage():
-                if message.is_empty:
-                    raise EmptyInputError(
-                        "The transcript has a user message with no content to send."
-                    )
+                reject_empty_user_turn(message)
                 return types.Content(
                     role="user",
                     parts=[types.Part(text=p.text) for p in message.parts],

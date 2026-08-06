@@ -51,7 +51,6 @@ except ImportError as e:
     ) from e
 
 from avior.core.exceptions import (
-    EmptyInputError,
     ProviderConnectionError,
     ProviderError,
     ProviderHTTPError,
@@ -77,7 +76,12 @@ from avior.core.provider import (
 )
 from avior.core.tools import Tool
 from avior.core.usage import Usage
-from avior.core.warnings import RunWarning, UnsupportedSettingRunWarning
+from avior.core.warnings import RunWarning
+from avior.providers._shared import (
+    reject_empty_user_turn,
+    sampling_dropped,
+    thinking_dropped,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -683,7 +687,8 @@ class OpenAIResponsesProvider(Provider):
             # Disabling (`False`) is a harmless no-op.
             if thinking is not False:
                 warnings.append(
-                    self._thinking_dropped(
+                    thinking_dropped(
+                        self.name,
                         settings,
                         "the model is not a recognized reasoning model; if it "
                         "does reason, configure reasoning via the `openai` "
@@ -699,7 +704,8 @@ class OpenAIResponsesProvider(Provider):
                 case "always_on":
                     # Reasoning cannot be turned off.
                     warnings.append(
-                        self._thinking_dropped(
+                        thinking_dropped(
+                            self.name,
                             settings,
                             "the model always reasons and cannot be disabled",
                         )
@@ -745,7 +751,8 @@ class OpenAIResponsesProvider(Provider):
 
         if reasoning_active:
             warnings.append(
-                self._sampling_dropped(
+                sampling_dropped(
+                    self.name,
                     settings,
                     "a custom temperature is not accepted while reasoning is active",
                 )
@@ -753,41 +760,6 @@ class OpenAIResponsesProvider(Provider):
             return omit
 
         return temperature
-
-    def _thinking_dropped(
-        self,
-        settings: ModelSettings,
-        reason: str | None = None,
-    ) -> UnsupportedSettingRunWarning:
-        """Build the warning for a `thinking` request that was dropped.
-
-        `reason` is an optional standalone explanation of why the request could
-        not be honored; it is `None` when the generic message already says
-        enough.
-        """
-
-        return UnsupportedSettingRunWarning(
-            setting_name="thinking",
-            setting_value=settings.thinking,
-            reason=reason,
-            provider=self.name,
-            model=settings.model,
-        )
-
-    def _sampling_dropped(
-        self,
-        settings: ModelSettings,
-        reason: str,
-    ) -> UnsupportedSettingRunWarning:
-        """Build the warning for a `temperature` that was dropped."""
-
-        return UnsupportedSettingRunWarning(
-            setting_name="temperature",
-            setting_value=settings.temperature,
-            reason=reason,
-            provider=self.name,
-            model=settings.model,
-        )
 
     async def aclose(self) -> None:
         """Close the underlying SDK client when this provider owns it.
@@ -1056,10 +1028,7 @@ class OpenAIResponsesProvider(Provider):
 
         match message:
             case UserMessage():
-                if message.is_empty:
-                    raise EmptyInputError(
-                        "The transcript has a user message with no content to send."
-                    )
+                reject_empty_user_turn(message)
                 return [
                     EasyInputMessageParam(
                         role="user",
