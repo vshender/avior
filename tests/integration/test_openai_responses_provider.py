@@ -503,20 +503,29 @@ async def test_complete_returns_reasoning_summary_against_openai(
     The portable level does not request a summary, so it is asked for through
     the raw `reasoning` provider option (`summary="auto"`).  The reasoning item
     then carries summary text, which decodes into the `ThinkingPart` content.
+    The prompt is a small multi-step puzzle: on a trivial task the reasoning
+    is so short that the summarizer regularly produces no text at all, and
+    the summary arrives empty.
     """
 
     # GIVEN settings whose raw reasoning option requests a summary
     settings = ModelSettings(
         model=_REASONING_MODEL,
-        max_tokens=2048,
+        max_tokens=4096,
         provider_options={
-            "openai": {"reasoning": {"effort": "high", "summary": "auto"}}
+            "openai": {"reasoning": {"effort": "medium", "summary": "auto"}}
         },
     )
 
-    # WHEN `complete` is awaited on a prompt that needs reasoning
+    # WHEN `complete` is awaited on a prompt that needs multi-step reasoning
     result = await openai_responses_provider.complete(
-        [UserMessage.from_text("What is 17 * 23?  Reason step by step.")],
+        [
+            UserMessage.from_text(
+                "A snail climbs a 10-meter pole: 3 meters up each day, 2 "
+                "meters down each night.  On which day does it reach the "
+                "top?  Reason step by step."
+            )
+        ],
         settings,
     )
 
