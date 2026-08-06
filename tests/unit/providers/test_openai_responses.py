@@ -1297,6 +1297,31 @@ async def test_complete_warns_when_provider_total_diverges_from_derived(
     assert result.raw_usage["total_tokens"] == 42
 
 
+async def test_complete_skips_the_total_cross_check_without_a_provider_total(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An absent provider `total_tokens` skips the divergence cross-check.
+
+    The OpenAI SDK annotates `total_tokens` as required but builds response
+    models without validation, so a wire payload omitting it leaves `None` at
+    runtime; there is nothing to cross-check against.
+    """
+
+    # GIVEN a response whose usage carries no reported total
+    usage = ResponseUsage.construct(input_tokens=11, output_tokens=7)
+    response = _response("hi", usage=usage)
+    provider = _provider(_mock_client_returning(response))
+
+    # WHEN `complete` is awaited
+    with caplog.at_level("WARNING", logger="avior.providers.openai_responses"):
+        result = await provider.complete([UserMessage.from_text("hi")], _settings())
+
+    # THEN no warning is logged, and avior reports the derived total
+    assert caplog.records == []
+    assert result.usage is not None
+    assert result.usage.total_tokens == 18
+
+
 # Exception translation tests
 # -----------------------------------------------------------------------------
 

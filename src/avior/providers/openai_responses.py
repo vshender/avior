@@ -792,14 +792,16 @@ class OpenAIResponsesProvider(Provider):
         if usage is None:
             return None
 
-        # The OpenAI SDK annotates the usage detail objects and both cache
-        # counters as required, but builds response models without validation,
-        # so a wire payload that omits any of them - an OpenAI-compatible
-        # endpoint, or a payload predating a field - yields `None` at runtime.
-        # The `cast`s widen the SDK's declared types to what actually arrives
-        # (a plain `| None` annotation would not survive the type checker's
-        # assignment narrowing).  An absent cache count genuinely means zero;
-        # absent output details leave the reasoning breakdown unknown.
+        # The OpenAI SDK annotates the usage detail objects, both cache
+        # counters, and the reported total as required, but builds response
+        # models without validation, so a wire payload that omits any of them
+        # - an OpenAI-compatible endpoint, or a payload predating a field -
+        # yields `None` at runtime.  The `cast`s widen the SDK's declared
+        # types to what actually arrives (a plain `| None` annotation would
+        # not survive the type checker's assignment narrowing).  An absent
+        # cache count genuinely means zero; absent output details leave the
+        # reasoning breakdown unknown; an absent reported total leaves
+        # nothing to cross-check below.
         input_details = cast(InputTokensDetails | None, usage.input_tokens_details)
         output_details = cast(OutputTokensDetails | None, usage.output_tokens_details)
         cache_read = input_details.cached_tokens if input_details is not None else None
@@ -821,11 +823,12 @@ class OpenAIResponsesProvider(Provider):
         # `Usage` derives.  If they ever diverge, warn rather than silently
         # shipping a total that disagrees with the provider (whose own number
         # stays in `raw_usage`).
-        if usage.total_tokens != mapped.total_tokens:
+        reported_total = cast(int | None, usage.total_tokens)
+        if reported_total is not None and reported_total != mapped.total_tokens:
             logger.warning(
                 "OpenAI reported total_tokens=%d != avior's derived total %d; "
                 "avior reports the derived total (provider's stays in raw_usage).",
-                usage.total_tokens,
+                reported_total,
                 mapped.total_tokens,
             )
 
