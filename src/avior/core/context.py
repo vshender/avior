@@ -12,7 +12,7 @@ backend that can pause a run and resume it later.
 """
 
 from dataclasses import dataclass
-from typing import Generic
+from typing import Generic, final
 
 from typing_extensions import TypeVar
 
@@ -44,6 +44,7 @@ from typing_extensions import TypeVar
 Deps = TypeVar("Deps", covariant=True, default=None)
 
 
+@final
 @dataclass(frozen=True, kw_only=True)
 class RunContext(Generic[Deps]):
     """The read-only context a tool receives for one tool call.

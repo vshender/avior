@@ -12,7 +12,7 @@ Provider adapters translate between this canonical form and the wire shape of
 the underlying API.
 """
 
-from typing import Annotated, Literal, Self
+from typing import Annotated, Literal, Self, final
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
@@ -49,6 +49,7 @@ without branching on vendor specifics:
 """
 
 
+@final
 class TextPart(BaseModel):
     """A plain text content part of a message."""
 
@@ -75,6 +76,7 @@ class TextPart(BaseModel):
     """
 
 
+@final
 class ToolCallPart(BaseModel):
     """A request from the LLM to call a tool, part of an assistant turn."""
 
@@ -107,6 +109,7 @@ class ToolCallPart(BaseModel):
     """
 
 
+@final
 class ToolResultOk(BaseModel):
     """A successful tool call's result."""
 
@@ -118,6 +121,7 @@ class ToolResultOk(BaseModel):
     """The tool call's result, rendered as text for the model."""
 
 
+@final
 class ToolResultError(BaseModel):
     """A failed tool call - the tool was missing, its arguments were invalid, or
     `execute` raised.
@@ -138,6 +142,7 @@ type ToolResult = Annotated[
 """The outcome of a single tool call: `ToolResultOk` or `ToolResultError`."""
 
 
+@final
 class ToolResultPart(BaseModel):
     """A tool's result, returned to the LLM in a `ToolMessage`."""
 
@@ -164,6 +169,7 @@ class ToolResultPart(BaseModel):
         return cls(call_id=call_id, result=ToolResultError(content=message))
 
 
+@final
 class ThinkingPart(BaseModel):
     """A reasoning step a model emitted, part of an assistant turn.
 
@@ -211,6 +217,7 @@ type Part = Annotated[
 """Any typed content part of a message.  Discriminated on `kind`."""
 
 
+@final
 class UserMessage(BaseModel):
     """A `user`-role turn carrying the caller's input to the model."""
 
@@ -222,7 +229,10 @@ class UserMessage(BaseModel):
     """The caller's input, as text parts."""
 
     @model_validator(mode="after")
-    def _check_no_provider_details(self) -> Self:
+    # Pydantic invokes the validator through the decorator registration; the
+    # checker sees no reference to the private method itself, which on a
+    # `@final` class reads as unused.
+    def _check_no_provider_details(self) -> Self:  # pyright: ignore[reportUnusedFunction]
         """Reject a user turn whose part carries `provider_details`.
 
         `provider_details` holds opaque data of the provider that produced the
@@ -268,6 +278,7 @@ class UserMessage(BaseModel):
         return not (self.text or "").strip()
 
 
+@final
 class AssistantMessage(BaseModel):
     """An `assistant`-role turn produced by a model."""
 
@@ -305,7 +316,10 @@ class AssistantMessage(BaseModel):
     """
 
     @model_validator(mode="after")
-    def _check_provider_details_owned(self) -> Self:
+    # Pydantic invokes the validator through the decorator registration; the
+    # checker sees no reference to the private method itself, which on a
+    # `@final` class reads as unused.
+    def _check_provider_details_owned(self) -> Self:  # pyright: ignore[reportUnusedFunction]
         """Reject a turn whose parts carry `provider_details` with no owner.
 
         `provider_details` holds opaque data of the provider that produced the
@@ -343,6 +357,7 @@ class AssistantMessage(BaseModel):
         return "".join(texts) if texts else None
 
 
+@final
 class ToolMessage(BaseModel):
     """A turn carrying tool-call results back to the model."""
 

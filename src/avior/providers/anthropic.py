@@ -8,7 +8,7 @@ Install via the optional extra: `pip install avior[anthropic]`.
 
 import logging
 from collections.abc import Sequence
-from typing import Any, Literal, TypedDict, assert_never, cast
+from typing import Any, Final, Literal, TypedDict, assert_never, cast, final, override
 
 from pydantic import ConfigDict, TypeAdapter
 
@@ -84,11 +84,11 @@ logger = logging.getLogger(__name__)
 # Anthropic SDK's non-streaming guard, which does not expose them as reusable
 # constants; if that ceiling ever drops below this, the guard raises (surfaced
 # as `ProviderError`) rather than failing silently.
-_NONSTREAMING_LIMIT_MINUTES = 10
-_MINUTES_PER_HOUR = 60
-_TOKENS_PER_HOUR = 128_000
+_NONSTREAMING_LIMIT_MINUTES: Final = 10
+_MINUTES_PER_HOUR: Final = 60
+_TOKENS_PER_HOUR: Final = 128_000
 
-_MAX_NONSTREAMING_TOKENS = (
+_MAX_NONSTREAMING_TOKENS: Final = (
     _TOKENS_PER_HOUR * _NONSTREAMING_LIMIT_MINUTES // _MINUTES_PER_HOUR
 )
 """`max_tokens` used when `ModelSettings.max_tokens` is `None`.
@@ -110,7 +110,7 @@ type _ThinkingMode = Literal["adaptive", "always_on", "budget"]
   model accepts neither adaptive thinking nor `output_config.effort`.
 """
 
-_THINKING_MODES: dict[str, _ThinkingMode] = {
+_THINKING_MODES: Final[dict[str, _ThinkingMode]] = {
     "claude-haiku-4-5": "budget",
     "claude-sonnet-4-5": "budget",
     "claude-sonnet-4-6": "adaptive",
@@ -157,7 +157,7 @@ def _matches_prefix(model: str, prefix: str) -> bool:
     return model == prefix or model.startswith(prefix + "-")
 
 
-_THINKING_BUDGET_TOKENS: dict[Literal[True, "low", "medium", "high"], int] = {
+_THINKING_BUDGET_TOKENS: Final[dict[Literal[True, "low", "medium", "high"], int]] = {
     True: 10000,
     "low": 2048,
     "medium": 10000,
@@ -173,7 +173,7 @@ type _ThinkingEffort = Literal["low", "medium", "high", "xhigh", "max"]
 """`output_config.effort` levels Anthropic accepts."""
 
 
-_DEFAULT_TEMPERATURE = 1
+_DEFAULT_TEMPERATURE: Final = 1
 """The only `temperature` Anthropic accepts when sampling is constrained.
 
 Anthropic rejects any other `temperature` on a model that does not accept
@@ -182,7 +182,7 @@ Anthropic's `temperature` parameter defaults to this value, so sending it in a
 request is the same as omitting it.
 """
 
-_NO_CUSTOM_SAMPLING_MODELS = frozenset(
+_NO_CUSTOM_SAMPLING_MODELS: Final = frozenset(
     {
         "claude-sonnet-5",
         "claude-opus-4-7",
@@ -237,10 +237,11 @@ class AnthropicProviderOptions(TypedDict, total=False):
     """
 
 
-_ANTHROPIC_OPTIONS_ADAPTER = TypeAdapter(AnthropicProviderOptions)
+_ANTHROPIC_OPTIONS_ADAPTER: Final = TypeAdapter(AnthropicProviderOptions)
 """`TypeAdapter` for the `provider_options["anthropic"]` slice."""
 
 
+@final
 class AnthropicProvider(Provider):
     """Async adapter to Anthropic's Messages API.
 
@@ -277,11 +278,13 @@ class AnthropicProvider(Provider):
             self._owns_client = True
 
     @property
+    @override
     def name(self) -> str:
         """The provider's canonical name."""
 
         return "anthropic"
 
+    @override
     def model_capabilities(self, model: str) -> ModelCapabilities:
         """Report what `model` supports.
 
@@ -294,6 +297,7 @@ class AnthropicProvider(Provider):
             supports_thinking=_thinking_mode(model) is not None,
         )
 
+    @override
     async def complete(
         self,
         messages: Sequence[Message],
@@ -502,6 +506,7 @@ class AnthropicProvider(Provider):
             warnings=warnings,
         )
 
+    @override
     async def aclose(self) -> None:
         """Close the underlying SDK client when this provider owns it.
 

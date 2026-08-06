@@ -10,7 +10,7 @@ import base64
 import logging
 import uuid
 from collections.abc import Callable, Sequence
-from typing import Any, Literal, TypedDict, assert_never
+from typing import Any, Final, Literal, TypedDict, assert_never, final, override
 
 from pydantic import ConfigDict, JsonValue, TypeAdapter
 
@@ -79,7 +79,7 @@ Which config values turn thinking on or off is the other axis: the model's
 `_ThinkingShape`.
 """
 
-_THINKING_MODELS: dict[str, tuple[_ThinkingShape, _ThinkingMode]] = {
+_THINKING_MODELS: Final[dict[str, tuple[_ThinkingShape, _ThinkingMode]]] = {
     "gemini-2.5-flash": ("budget", "on_by_default"),
     "gemini-2.5-flash-lite": ("budget", "off_by_default"),
     "gemini-2.5-pro": ("budget", "always_on"),
@@ -151,7 +151,7 @@ def _matches_family(model: str, family: str) -> bool:
     )
 
 
-_THINKING_BUDGET_TOKENS: dict[Literal["low", "medium", "high"], int] = {
+_THINKING_BUDGET_TOKENS: Final[dict[Literal["low", "medium", "high"], int]] = {
     "low": 2048,
     "medium": 8192,
     "high": 24576,
@@ -162,14 +162,14 @@ The values fit the `thinking_budget` range of every budget-shape model;
 `high` is the largest budget the 2.5-flash family accepts.
 """
 
-_THINKING_LEVELS: dict[Literal["low", "medium", "high"], types.ThinkingLevel] = {
+_THINKING_LEVELS: Final[dict[Literal["low", "medium", "high"], types.ThinkingLevel]] = {
     "low": types.ThinkingLevel.LOW,
     "medium": types.ThinkingLevel.MEDIUM,
     "high": types.ThinkingLevel.HIGH,
 }
 """`thinking_level` for each portable thinking level on a level-shape model."""
 
-_DEFAULT_LEVEL = types.ThinkingLevel.MEDIUM
+_DEFAULT_LEVEL: Final = types.ThinkingLevel.MEDIUM
 """The level that `thinking=True` selects on an `off_by_default` level-shape
 model.
 
@@ -180,7 +180,7 @@ budget-shape model does not need this constant: its dialect has a native
 "model-chosen depth" value, `thinking_budget=-1`.
 """
 
-_SKIP_SIGNATURE_VALIDATOR = b"skip_thought_signature_validator"
+_SKIP_SIGNATURE_VALIDATOR: Final = b"skip_thought_signature_validator"
 """Placeholder `thought_signature` accepted by the Gemini API in place of a
 real one.
 
@@ -233,10 +233,11 @@ class GeminiProviderOptions(TypedDict, total=False):
     """
 
 
-_GEMINI_OPTIONS_ADAPTER = TypeAdapter(GeminiProviderOptions)
+_GEMINI_OPTIONS_ADAPTER: Final = TypeAdapter(GeminiProviderOptions)
 """`TypeAdapter` for the `provider_options["gemini"]` slice."""
 
 
+@final
 class GeminiProvider(Provider):
     """Async adapter to the Gemini Developer API.
 
@@ -283,11 +284,13 @@ class GeminiProvider(Provider):
             self._owns_client = True
 
     @property
+    @override
     def name(self) -> str:
         """The provider's canonical name."""
 
         return "gemini"
 
+    @override
     def model_capabilities(self, model: str) -> ModelCapabilities:
         """Report what `model` supports.
 
@@ -298,6 +301,7 @@ class GeminiProvider(Provider):
 
         return ModelCapabilities(supports_thinking=_thinking_support(model) is not None)
 
+    @override
     async def complete(
         self,
         messages: Sequence[Message],
@@ -575,6 +579,7 @@ class GeminiProvider(Provider):
             warnings=warnings,
         )
 
+    @override
     async def aclose(self) -> None:
         """Close the underlying SDK client when this provider owns it.
 

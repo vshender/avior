@@ -4,6 +4,8 @@
 run produced and the information needed to inspect or continue it.
 """
 
+from typing import final
+
 from pydantic import BaseModel, ConfigDict, Field
 
 from avior.core.messages import Message
@@ -12,6 +14,7 @@ from avior.core.usage import Usage
 from avior.core.warnings import RunWarning
 
 
+@final
 class RunResult(BaseModel):
     """The outcome of a single `Runner.run`."""
 

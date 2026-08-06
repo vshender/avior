@@ -8,7 +8,7 @@ warning as it occurs, and every warning is also collected on
 
 import logging
 from collections.abc import Callable
-from typing import Literal
+from typing import Final, Literal, final
 
 from pydantic import BaseModel, ConfigDict, JsonValue, computed_field
 
@@ -16,9 +16,10 @@ logger = logging.getLogger(__name__)
 
 # Bound the requested value shown in `message` so a large raw config does not
 # bloat log lines; the full value stays in `setting_value`.
-_MAX_VALUE_REPR_LEN = 60
+_MAX_VALUE_REPR_LEN: Final = 60
 
 
+@final
 class UnsupportedSettingRunWarning(BaseModel):
     """A setting the chosen model could not honor."""
 

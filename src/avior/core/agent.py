@@ -3,7 +3,7 @@
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any, Generic
+from typing import Any, Generic, final
 
 from typing_extensions import TypeVar
 
@@ -20,6 +20,7 @@ from avior.core.tools import Tool
 Deps = TypeVar("Deps", default=None)
 
 
+@final
 @dataclass(frozen=True, kw_only=True)
 class Agent(Generic[Deps]):
     """A declarative definition of agent behavior that a `Runner` drives.

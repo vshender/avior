@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass
 from types import TracebackType
-from typing import Any, Literal, Self
+from typing import Any, Literal, Self, final
 
 from pydantic import (
     BaseModel,
@@ -22,6 +22,7 @@ from avior.core.usage import Usage
 from avior.core.warnings import RunWarning
 
 
+@final
 class ModelSettings(BaseModel):
     """Per-call model invocation settings."""
 
@@ -110,6 +111,7 @@ def resolve_provider_options[Options](
         raise AviorUsageError(f"Invalid `provider_options[{name!r}]`: {e}") from e
 
 
+@final
 class ProviderResponse(BaseModel):
     """Result of a single `Provider.complete` call.
 
@@ -277,6 +279,7 @@ class Provider(ABC):
 
         return ModelCapabilities()
 
+    @final
     async def __aenter__(self) -> Self:
         """Enter the provider as an async context manager.
 
@@ -286,6 +289,7 @@ class Provider(ABC):
         self._entered_count += 1
         return self
 
+    @final
     async def __aexit__(
         self,
         exc_type: type[BaseException] | None,

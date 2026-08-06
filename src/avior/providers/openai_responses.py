@@ -14,7 +14,7 @@ import json
 import logging
 import math
 from collections.abc import Sequence
-from typing import Any, Literal, TypedDict, assert_never, cast
+from typing import Any, Final, Literal, TypedDict, assert_never, cast, final, override
 
 from pydantic import ConfigDict, JsonValue, TypeAdapter
 
@@ -87,6 +87,7 @@ from avior.providers._shared import (
 logger = logging.getLogger(__name__)
 
 
+@final
 class _MalformedToolCallArguments(ValueError):
     """Tool-call `arguments` avior cannot use: not valid JSON, valid JSON
     that is not an object, or a number that is not finite.
@@ -137,7 +138,7 @@ type _ReasoningMode = Literal["off_by_default", "on_by_default", "always_on"]
 """
 
 
-_DEFAULT_EFFORT: Literal["medium"] = "medium"
+_DEFAULT_EFFORT: Final[Literal["medium"]] = "medium"
 """The effort that `thinking=True` selects on an `off_by_default` model.
 
 An `off_by_default` model needs an explicit effort to start reasoning.  `medium`
@@ -146,7 +147,7 @@ so `thinking=True` turns reasoning on without committing to the lightest or
 deepest setting.
 """
 
-_DEFAULT_TEMPERATURE = 1
+_DEFAULT_TEMPERATURE: Final = 1
 """The only `temperature` OpenAI accepts while reasoning is active.
 
 OpenAI rejects any other `temperature` on a request with reasoning active.
@@ -154,7 +155,7 @@ OpenAI's `temperature` parameter defaults to this value, so sending it in a
 request is the same as omitting it.
 """
 
-_REASONING_RULES: list[tuple[str | None, str | None, _ReasoningMode | None]] = [
+_REASONING_RULES: Final[list[tuple[str | None, str | None, _ReasoningMode | None]]] = [
     (None, "chat", None),  # a `-chat` variant never reasons
     (None, "pro", "always_on"),  # a `-pro` variant always reasons
     # The one `-codex` that can disable reasoning:
@@ -326,10 +327,11 @@ class OpenAIProviderOptions(TypedDict, total=False):
     """
 
 
-_OPENAI_OPTIONS_ADAPTER = TypeAdapter(OpenAIProviderOptions)
+_OPENAI_OPTIONS_ADAPTER: Final = TypeAdapter(OpenAIProviderOptions)
 """`TypeAdapter` for the `provider_options["openai"]` slice."""
 
 
+@final
 class OpenAIResponsesProvider(Provider):
     """Async adapter to OpenAI's Responses API.
 
@@ -366,11 +368,13 @@ class OpenAIResponsesProvider(Provider):
             self._owns_client = True
 
     @property
+    @override
     def name(self) -> str:
         """The provider's canonical name."""
 
         return "openai"
 
+    @override
     def model_capabilities(self, model: str) -> ModelCapabilities:
         """Report what `model` supports.
 
@@ -381,6 +385,7 @@ class OpenAIResponsesProvider(Provider):
 
         return ModelCapabilities(supports_thinking=_reasoning_mode(model) is not None)
 
+    @override
     async def complete(
         self,
         messages: Sequence[Message],
@@ -762,6 +767,7 @@ class OpenAIResponsesProvider(Provider):
 
         return temperature
 
+    @override
     async def aclose(self) -> None:
         """Close the underlying SDK client when this provider owns it.
 

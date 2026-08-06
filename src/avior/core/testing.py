@@ -10,7 +10,7 @@ later assertion.
 
 from collections.abc import Awaitable, Callable, Sequence
 from inspect import isawaitable
-from typing import Any, NamedTuple, Self
+from typing import Any, NamedTuple, Self, final, override
 
 from avior.core.messages import AssistantMessage, Message, TextPart
 from avior.core.provider import ModelSettings, Provider, ProviderResponse
@@ -61,6 +61,7 @@ type StubPredicate = Callable[[StubCall], bool]
 """A predicate over the `StubCall`, used by `from_predicates`."""
 
 
+@final
 class StubProvider(Provider):
     """Programmable test double for the `Provider` abstraction.
 
@@ -149,6 +150,7 @@ class StubProvider(Provider):
         self.calls: list[StubCall] = []
 
     @property
+    @override
     def name(self) -> str:
         """The provider's canonical name."""
 
@@ -220,6 +222,7 @@ class StubProvider(Provider):
 
         return cls(func)
 
+    @override
     async def complete(
         self,
         messages: Sequence[Message],
@@ -260,6 +263,7 @@ class StubProvider(Provider):
 
         return self._normalize_response(result)
 
+    @override
     async def aclose(self) -> None:
         """No-op: the stub holds no real resources to release."""
 

@@ -26,14 +26,17 @@ from typing import (
     Annotated,
     Any,
     Concatenate,
+    Final,
     Generic,
     Literal,
     Protocol,
     cast,
+    final,
     get_args,
     get_origin,
     get_type_hints,
     overload,
+    override,
 )
 
 from docstring_parser import Docstring, DocstringStyle
@@ -50,7 +53,7 @@ from avior.core.exceptions import ConfigurationError
 # it.
 type DocstringFormat = Literal["auto", "google", "numpy", "sphinx"]
 
-_DOCSTRING_STYLES: dict[DocstringFormat, DocstringStyle] = {
+_DOCSTRING_STYLES: Final[dict[DocstringFormat, DocstringStyle]] = {
     "auto": DocstringStyle.AUTO,
     "google": DocstringStyle.GOOGLE,
     "numpy": DocstringStyle.NUMPYDOC,
@@ -158,6 +161,7 @@ class Tool(ABC, Generic[Args, Result, Deps]):
 # name the same concepts (a tool's result and deps types).
 
 
+@final
 @dataclass(frozen=True)
 class FunctionTool[Result, Deps](Tool[Any, Result, Deps]):
     """A `Tool` whose behavior is a Python function, produced by `@tool`.
@@ -198,6 +202,7 @@ class FunctionTool[Result, Deps](Tool[Any, Result, Deps]):
     positional_params: tuple[str, ...]
     """`func`'s positional-only parameters, in order (passed positionally)."""
 
+    @override
     async def execute(self, ctx: RunContext[Deps], args: BaseModel) -> Result:
         """Call the wrapped function with the validated arguments.
 
@@ -269,7 +274,7 @@ class _ToolDecorator(Protocol):
 # Sentinel for an omitted `func`, kept distinct from a real `func=None`: `None`
 # is not a valid function, so a passed `None` must reach the validation (and be
 # rejected), not read as "no function passed" (which is the decorator form).
-_MISSING: Any = object()
+_MISSING: Final[Any] = object()
 
 
 # The four function overloads are tried top to bottom, so their order is
@@ -709,6 +714,7 @@ def _annotated_return_description(func: Callable[..., object]) -> str | None:
     return None
 
 
+@final
 @dataclass(frozen=True)
 class _ToolDoc:
     """The parser-agnostic pieces a tool description is rendered from.

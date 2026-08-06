@@ -2,7 +2,7 @@
 
 import json
 from collections.abc import Mapping, Sequence
-from typing import Any, assert_never, overload
+from typing import Any, Final, assert_never, final, overload
 
 from pydantic import BaseModel, ValidationError
 from typing_extensions import TypeVar
@@ -43,9 +43,10 @@ Deps = TypeVar("Deps", default=None)
 # Sentinel for an omitted `deps` argument, kept distinct from a real `deps=None`
 # value: some declared deps types accept `None` (an empty `Protocol`, or `None`
 # itself), so a passed `deps=None` is valid and must not read as "not passed".
-_MISSING: Any = object()
+_MISSING: Final[Any] = object()
 
 
+@final
 class Runner:
     """Orchestrator that drives `Agent` execution against a `Provider`.
 

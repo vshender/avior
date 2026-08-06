@@ -48,10 +48,12 @@ call's reasoning is unknown, the aggregate's `reasoning_tokens` is `None` too.
 """
 
 from collections.abc import Iterable
+from typing import final
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 
+@final
 class Usage(BaseModel):
     """Normalized token counts for a model interaction.
 
