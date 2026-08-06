@@ -529,11 +529,11 @@ class GeminiProvider(Provider):
         )
 
         # A nameless call on a continuable finish (`"stop"` / `"tool_use"`) is
-        # malformed tool-call data from the model - the same class as
-        # `MALFORMED_FUNCTION_CALL` - so surface it as the canonical `"error"`
-        # stop reason, not a provider decode error.  On a terminal finish the
-        # stop reason already describes the outcome and the dropped partial call
-        # is just an artifact of the truncation or block, so let it pass.
+        # degenerate model output - the same class as `MALFORMED_FUNCTION_CALL`
+        # - so it surfaces as the canonical `"error"` stop reason, not a
+        # provider decode error.  On a terminal finish the stop reason already
+        # describes the outcome and the dropped partial call is just an
+        # artifact of the truncation or block, so let it stand.
         nameless_drove_error = saw_nameless_call and stop_reason in (
             "stop",
             "tool_use",

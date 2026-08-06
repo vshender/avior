@@ -238,6 +238,20 @@ class Provider(ABC):
         Returns:
             A `ProviderResponse` carrying the assistant message and the
             call metadata.
+
+        Fault handling is split by class, uniformly across adapters:
+
+        - An *unrepresentable response* raises `ProviderResponseValidationError`
+          at the point of detection: the response needs a capability avior
+          does not have (an unsupported content kind, a continuation avior
+          cannot resume), or its envelope cannot be decoded by the provider
+          SDK.  No valid canonical transcript can be built from it, so the
+          adapter raises immediately.
+        - *Degenerate model output* is classified, not raised: the response is
+          representable, but the model produced no usable result (an abnormal
+          provider finish, a malformed or missing tool call).  The message
+          carries `stop_reason="error"` with the cause in `stop_detail`, and
+          the runner is the single raise point for this class.
         """
 
     @abstractmethod

@@ -467,21 +467,24 @@ class AnthropicProvider(Provider):
                 )
 
         stop_reason = self._map_stop_reason(response)
+        stop_detail: str | None = None
 
-        # `stop_reason="tool_use"` with no decoded tool call would hand the
-        # `Runner` an empty turn that reads as a final answer; surface it
-        # instead.
+        # A `tool_use` stop with no decoded tool call is degenerate model
+        # output: the model announced a call it never produced, and the turn
+        # would otherwise read as a final answer.  It surfaces as the
+        # canonical `"error"` stop reason, with the cause carried beside it
+        # in `stop_detail`.
         if stop_reason == "tool_use" and not any(
             isinstance(p, ToolCallPart) for p in parts
         ):
-            raise ProviderResponseValidationError(
-                "Anthropic reported stop_reason='tool_use' but decoded no tool call."
-            )
+            stop_reason = "error"
+            stop_detail = "tool_use stop with no decoded tool call"
 
         return ProviderResponse(
             message=AssistantMessage(
                 parts=parts,
                 stop_reason=stop_reason,
+                stop_detail=stop_detail,
                 provider_name=self.name,
             ),
             usage=self._map_usage(response.usage),

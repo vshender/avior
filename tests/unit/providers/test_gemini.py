@@ -752,8 +752,8 @@ async def test_complete_maps_terminal_finish_with_nameless_call_to_terminal() ->
 
     A `MAX_TOKENS` finish can truncate a tool call mid-stream, leaving it
     without a name.  That partial call is an artifact of the truncation, so it
-    is dropped and the finish surfaces as `"max_tokens"` - it must not raise a
-    validation error as a nameless call on a normal finish would.
+    is dropped and the finish surfaces as `"max_tokens"` - not reclassified to
+    `"error"` as a nameless call on a continuable finish is.
     """
 
     # GIVEN a max-tokens-truncated response carrying a nameless function call
@@ -987,13 +987,12 @@ async def test_complete_synthesizes_id_when_provider_reuses_one_across_turns() -
 
 
 async def test_complete_maps_nameless_function_call_to_error() -> None:
-    """A nameless `function_call` on a normal finish maps to `"error"`.
+    """A nameless `function_call` on a continuable finish maps to `"error"`.
 
     The Gemini SDK decoded the response fine, but a tool call with no name is
-    malformed tool-call data from the model - the same class as
-    `MALFORMED_FUNCTION_CALL` - so it surfaces as the canonical `"error"` stop
-    reason (a model failure), not a provider decode error.  The unusable call is
-    dropped.
+    degenerate model output - the same class as `MALFORMED_FUNCTION_CALL` - so
+    it surfaces as the canonical `"error"` stop reason (a model failure), not
+    a provider decode error.  The unusable call is dropped.
     """
 
     # GIVEN a `STOP`-finish response whose only call has no name

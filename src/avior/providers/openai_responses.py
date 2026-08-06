@@ -12,6 +12,7 @@ Install via the optional extra: `pip install avior[openai]`.
 
 import json
 import logging
+import math
 from collections.abc import Sequence
 from typing import Any, Literal, TypedDict, assert_never, cast
 
@@ -78,6 +79,44 @@ from avior.core.usage import Usage
 from avior.core.warnings import RunWarning, UnsupportedSettingRunWarning
 
 logger = logging.getLogger(__name__)
+
+
+class _MalformedToolCallArguments(ValueError):
+    """Tool-call `arguments` avior cannot use: not valid JSON, valid JSON
+    that is not an object, or a number that is not finite.
+
+    A dedicated type, so the decode loop catches exactly this fault and
+    nothing else.  A `ValidationError` from `ToolCallPart` construction is
+    also a `ValueError` subclass, and it must keep escaping as a bug rather
+    than be blamed on the model - for example a required item field the
+    OpenAI SDK's non-validating response parsing left `None`.
+    """
+
+
+def _reject_non_finite(constant: str) -> Any:
+    """Reject `NaN` / `Infinity` / `-Infinity` in tool-call arguments.
+
+    Python's `json` parses these non-standard JSON constants by default, but
+    the canonical IR rejects non-finite numbers (`allow_inf_nan=False`), so
+    they classify as malformed arguments at decode time rather than failing
+    part construction.
+    """
+
+    raise _MalformedToolCallArguments(f"non-finite number {constant}")
+
+
+def _parse_finite_float(text: str) -> float:
+    """Parse a JSON number, rejecting one that overflows to infinity.
+
+    A literal like `1e999` is valid JSON syntax but parses to an infinite float,
+    which the canonical IR rejects (`allow_inf_nan=False`); it classifies as
+    malformed arguments at decode time, like the non-finite constants.
+    """
+
+    value = float(text)
+    if not math.isfinite(value):
+        raise _MalformedToolCallArguments(f"number {text} is not finite")
+    return value
 
 
 type _ReasoningMode = Literal["off_by_default", "on_by_default", "always_on"]
@@ -493,6 +532,7 @@ class OpenAIResponsesProvider(Provider):
         # `parts` (see below).
         parts: list[AssistantPart] = []
         refusal_parts: list[AssistantPart] = []
+        malformed_call_detail: str | None = None
         for item in response.output:
             if isinstance(item, ResponseOutputMessage):
                 for content in item.content:
@@ -506,7 +546,16 @@ class OpenAIResponsesProvider(Provider):
 
             elif isinstance(item, ResponseFunctionToolCall):
                 if not incomplete:
-                    parts.append(self._to_tool_call_part(item))
+                    try:
+                        parts.append(self._to_tool_call_part(item))
+                    except _MalformedToolCallArguments as e:
+                        # Malformed arguments are degenerate model output, not
+                        # a provider decode error - drop the unusable call now
+                        # and decide whether to fail once the stop reason is
+                        # known.  The first cause is kept when several calls
+                        # are malformed.
+                        if malformed_call_detail is None:
+                            malformed_call_detail = str(e)
 
             elif isinstance(item, ResponseReasoningItem):
                 parts.append(self._to_thinking_part(item))
@@ -530,14 +579,33 @@ class OpenAIResponsesProvider(Provider):
             has_refusal=bool(refusal_parts),
             has_tool_call=any(isinstance(p, ToolCallPart) for p in parts),
         )
+
+        # A malformed function call on a continuable finish (`"stop"` /
+        # `"tool_use"`) is degenerate model output - the model produced a call
+        # avior could not use - so it surfaces as the canonical `"error"` stop
+        # reason.  On a terminal finish (an abnormal status, a refusal) the
+        # stop reason already describes the outcome and the dropped call is
+        # just an artifact of it, so let it stand.
+        malformed_drove_error = malformed_call_detail is not None and stop_reason in (
+            "stop",
+            "tool_use",
+        )
+        if malformed_drove_error:
+            stop_reason = "error"
+
         stop_detail: str | None = None
         if stop_reason == "error":
             # The canonical `"error"` reason alone drops the provider-specific
-            # cause; carry the status (and the provider's error message when
-            # present) beside it so an abnormal finish stays diagnosable.
-            stop_detail = response.status or "unknown status"
-            if response.error is not None:
-                stop_detail = f"{stop_detail}: {response.error.message}"
+            # cause; carry it beside the canonical value so an abnormal finish
+            # stays diagnosable.
+            if malformed_drove_error:
+                stop_detail = (
+                    f"malformed function-call arguments: {malformed_call_detail}"
+                )
+            else:
+                stop_detail = response.status or "unknown status"
+                if response.error is not None:
+                    stop_detail = f"{stop_detail}: {response.error.message}"
 
         raw_usage = (
             response.usage.model_dump(mode="json")
@@ -882,11 +950,6 @@ class OpenAIResponsesProvider(Provider):
     def _to_tool_call_part(item: ResponseFunctionToolCall) -> ToolCallPart:
         """Decode a Responses `function_call` output item into a `ToolCallPart`.
 
-        The Responses API carries call arguments as a JSON string; it is parsed
-        into the `dict` that `ToolCallPart.args` expects (an empty string maps
-        to `{}`).  `call_id` (not `id`) is kept so the matching tool result can
-        be correlated back on the next request.
-
         The item `id` is deliberately not kept, so `_to_wire` replays every
         `function_call` without an id.  OpenAI checks that a reasoning item
         precedes its tool calls only for items that carry an id; a replay
@@ -895,15 +958,40 @@ class OpenAIResponsesProvider(Provider):
         for a turn from another provider, for a request whose reasoning is
         off, or for a part with no token to echo.  The cost: OpenAI cannot
         flag a broken pairing that avior itself produced.
+
+        Args:
+            item: The `function_call` output item.  The Responses API carries
+                its arguments as a JSON string; an empty string maps to `{}`.
+
+        Returns:
+            The decoded `ToolCallPart`, keeping `call_id` (not `id`) so the
+            matching tool result can be correlated back on the next request.
+
+        Raises:
+            _MalformedToolCallArguments: The arguments are unusable - not valid
+                JSON, a JSON payload that is not an object, or a payload
+                carrying a non-finite number.  The caller classifies the fault.
         """
 
         try:
-            args: dict[str, Any] = json.loads(item.arguments) if item.arguments else {}
+            decoded: Any = (
+                json.loads(
+                    item.arguments,
+                    parse_float=_parse_finite_float,
+                    parse_constant=_reject_non_finite,
+                )
+                if item.arguments
+                else {}
+            )
         except json.JSONDecodeError as e:
-            raise ProviderResponseValidationError(
-                f"OpenAI returned tool-call arguments that are not valid JSON: {e}"
-            ) from e
+            raise _MalformedToolCallArguments(str(e)) from e
 
+        if not isinstance(decoded, dict):
+            raise _MalformedToolCallArguments(
+                f"decoded to {type(decoded).__name__}, not an object"
+            )
+
+        args = cast(dict[str, JsonValue], decoded)
         return ToolCallPart(
             call_id=item.call_id,
             tool_name=item.name,

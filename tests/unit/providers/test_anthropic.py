@@ -710,12 +710,11 @@ async def test_complete_parses_parallel_tool_use_blocks() -> None:
     ]
 
 
-async def test_complete_raises_when_tool_use_stop_reason_has_no_tool_call() -> None:
-    """`stop_reason="tool_use"` with no decoded tool call raises.
+async def test_complete_maps_tool_use_stop_without_tool_call_to_error() -> None:
+    """A `tool_use` stop with no decoded tool call maps to `"error"`.
 
-    Anthropic pairs a `tool_use` stop reason with a `ToolUseBlock`.  A response
-    that claims `tool_use` but decodes no tool call would hand the `Runner` an
-    empty turn read as a final answer, so it fails loud.
+    The model announced a call it never produced - degenerate model output;
+    the empty turn must not read as a final answer.
     """
 
     # GIVEN a `tool_use`-stop response carrying only a text block
@@ -726,9 +725,11 @@ async def test_complete_raises_when_tool_use_stop_reason_has_no_tool_call() -> N
     provider = _provider(_mock_client_returning(response))
 
     # WHEN `complete` is awaited
-    # THEN `ProviderResponseValidationError` is raised
-    with pytest.raises(ProviderResponseValidationError):
-        await provider.complete([UserMessage.from_text("weather?")], _settings())
+    result = await provider.complete([UserMessage.from_text("weather?")], _settings())
+
+    # THEN the stop reason is `"error"` with the cause carried as the detail
+    assert result.message.stop_reason == "error"
+    assert result.message.stop_detail == "tool_use stop with no decoded tool call"
 
 
 async def test_complete_parses_empty_tool_use_input_into_empty_dict() -> None:

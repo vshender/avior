@@ -119,6 +119,7 @@ def _response(*texts: str, usage: ResponseUsage | None = None) -> Response:
 
 def _incomplete_response(
     reason: Literal["max_output_tokens", "content_filter"] | None,
+    *,
     output: list[ResponseOutputItem] | None = None,
 ) -> Response:
     """Build a `Response` with `status="incomplete"` and the given reason.
@@ -144,11 +145,14 @@ def _incomplete_response(
 
 def _status_response(
     status: Literal["failed", "cancelled", "queued", "in_progress"],
+    *,
     error: ResponseError | None = None,
+    output: list[ResponseOutputItem] | None = None,
 ) -> Response:
-    """Build an empty `Response` with the given status.
+    """Build a `Response` with the given status.
 
-    Pass `error` to attach the provider's error payload (default: none).
+    Pass `error` to attach the provider's error payload, and `output` to carry
+    output items (both default to none).
     """
 
     return Response(
@@ -156,7 +160,7 @@ def _status_response(
         object="response",
         created_at=0.0,
         model="gpt-test",
-        output=[],
+        output=output or [],
         parallel_tool_calls=False,
         tool_choice="auto",
         tools=[],
@@ -1582,17 +1586,61 @@ async def test_complete_parses_empty_arguments_into_empty_dict() -> None:
     ]
 
 
-async def test_complete_raises_validation_error_on_malformed_arguments() -> None:
-    """Non-JSON `arguments` map to `ProviderResponseValidationError`."""
+@pytest.mark.parametrize(
+    "arguments",
+    ["not json", "[1, 2]", '{"x": NaN}', '{"x": 1e999}'],
+    ids=["not-json", "non-object-json", "non-finite-constant", "numeric-overflow"],
+)
+async def test_complete_maps_malformed_tool_arguments_to_error(
+    arguments: str,
+) -> None:
+    """Unusable `arguments` map to `"error"` with the call dropped.
 
-    # GIVEN a function-call response whose arguments are not valid JSON
-    response = _function_call_response("call_1", "get_weather", "not json")
+    Non-JSON text, a JSON payload that is not an object, and a non-finite number
+    (which Python's `json` parses but the canonical IR rejects) are all
+    degenerate model output, not a provider decode error.
+    """
+
+    # GIVEN a function-call response whose arguments are unusable
+    response = _function_call_response("call_1", "get_weather", arguments)
     provider = _provider(_mock_client_returning(response))
 
     # WHEN `complete` is awaited
-    # THEN the decode failure surfaces as a provider validation error
-    with pytest.raises(ProviderResponseValidationError):
-        await provider.complete([UserMessage.from_text("weather?")], _settings())
+    result = await provider.complete([UserMessage.from_text("weather?")], _settings())
+
+    # THEN the stop reason is `"error"` with the cause carried as the detail,
+    # and the unusable call is dropped
+    assert result.message.stop_reason == "error"
+    assert result.message.stop_detail is not None
+    assert result.message.stop_detail.startswith("malformed function-call arguments:")
+    assert result.message.parts == []
+
+
+async def test_complete_prefers_status_detail_over_malformed_call() -> None:
+    """On a failed status the detail carries the status, not the malformed
+    call.
+
+    A terminal status already describes the outcome, so a malformed call in
+    the same response does not reclassify the stop, and the status keeps
+    `stop_detail`.
+    """
+
+    # GIVEN a failed response also carrying a call with unusable arguments
+    call = ResponseFunctionToolCall(
+        type="function_call",
+        call_id="call_1",
+        name="get_weather",
+        arguments="not json",
+    )
+    response = _status_response("failed", output=[call])
+    provider = _provider(_mock_client_returning(response))
+
+    # WHEN `complete` is awaited
+    result = await provider.complete([UserMessage.from_text("weather?")], _settings())
+
+    # THEN the stop reason is `"error"` with the status as the detail
+    assert result.message.stop_reason == "error"
+    assert result.message.stop_detail == "failed"
 
 
 async def test_complete_maps_function_call_to_tool_use_stop_reason() -> None:
@@ -1610,11 +1658,12 @@ async def test_complete_maps_function_call_to_tool_use_stop_reason() -> None:
 
 
 async def test_complete_skips_decoding_truncated_tool_call_on_max_tokens() -> None:
-    """A tool call truncated at max_output_tokens maps to max_tokens, not error.
+    """A tool call truncated at `max_output_tokens` maps to `"max_tokens"`,
+    not `"error"`.
 
     When OpenAI truncates a `function_call` mid-arguments, the leftover partial
-    JSON must not surface as a schema error: the terminal incomplete reason
-    wins and the truncated call is dropped rather than decoded.
+    JSON is an artifact of the truncation: the terminal incomplete reason wins,
+    and the truncated call is dropped rather than decoded.
     """
 
     # GIVEN an incomplete (max_output_tokens) response with a `function_call`
@@ -1631,8 +1680,8 @@ async def test_complete_skips_decoding_truncated_tool_call_on_max_tokens() -> No
     # WHEN `complete` is awaited
     result = await provider.complete([UserMessage.from_text("weather?")], _settings())
 
-    # THEN it resolves to the max_tokens stop reason without raising, and the
-    # truncated call is not surfaced as a tool-call part
+    # THEN it resolves to the `"max_tokens"` stop reason - not reclassified to
+    # `"error"` - and the truncated call is not surfaced as a tool-call part
     assert result.message.stop_reason == "max_tokens"
     assert result.message.parts == []
 
@@ -1641,7 +1690,7 @@ async def test_complete_skips_truncated_tool_call_on_reasonless_incomplete() -> 
     """An incomplete response with no reason still skips truncated tool calls.
 
     The skip is gated on `status == "incomplete"`, not on a mapped reason, so a
-    truncated `function_call` does not raise even when the reason is absent; the
+    truncated `function_call` is not decoded even when the reason is absent; the
     response maps to a plain `"stop"`.
     """
 
@@ -1659,7 +1708,8 @@ async def test_complete_skips_truncated_tool_call_on_reasonless_incomplete() -> 
     # WHEN `complete` is awaited
     result = await provider.complete([UserMessage.from_text("weather?")], _settings())
 
-    # THEN the truncated call is dropped (not decoded) and no error is raised
+    # THEN the truncated call is dropped (not decoded), and the stop is not
+    # reclassified
     assert result.message.stop_reason == "stop"
     assert result.message.parts == []
 
