@@ -7,6 +7,7 @@ run produced and the information needed to inspect or continue it.
 from pydantic import BaseModel, ConfigDict, Field
 
 from avior.core.messages import Message
+from avior.core.provider import ProviderResponse
 from avior.core.usage import Usage
 from avior.core.warnings import RunWarning
 
@@ -42,6 +43,19 @@ class RunResult(BaseModel):
 
     warnings: list[RunWarning] = Field(default_factory=list)
     """Non-fatal problems found during the run, in the order they occurred."""
+
+    provider_responses: list[ProviderResponse] = Field(default_factory=list)
+    """The `ProviderResponse` of every model call the run made, in call order.
+
+    The per-call records behind the aggregated fields: `usage` sums the usage
+    the entries report (`None` when no entry reports usage), and `warnings`
+    concatenates their warnings in the same order.  Kept for tooling that
+    needs per-call evidence rather than run totals.
+
+    Each entry wraps the same assistant message that appears in `messages`,
+    so a serialized result carries every assistant message the run produced
+    twice - the cost of keeping the per-call records complete.
+    """
 
     @property
     def new_messages(self) -> list[Message]:

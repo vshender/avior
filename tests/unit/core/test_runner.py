@@ -549,6 +549,95 @@ async def test_runner_run_usage_is_none_when_provider_reports_none() -> None:
     assert result.usage is None
 
 
+async def test_runner_run_usage_sums_over_provider_responses() -> None:
+    """`Runner.run`'s aggregated usage sums the recorded responses' usage."""
+
+    # GIVEN an agent with a tool, and a provider scripted with two responses
+    # (a tool call, then a final text) carrying distinct usage
+    @tool
+    def echo(value: str) -> str:
+        """Echo the value."""
+
+        return value
+
+    agent = Agent(
+        instructions="you are helpful",
+        model_settings=ModelSettings(model="test-model"),
+        tools=[echo],
+    )
+    first_usage = Usage(input_tokens=11, output_tokens=7)
+    second_usage = Usage(input_tokens=23, output_tokens=5)
+    provider = StubProvider.from_responses(
+        [
+            ProviderResponse(
+                message=AssistantMessage(
+                    parts=[
+                        ToolCallPart(
+                            call_id="c1", tool_name="echo", args={"value": "hi"}
+                        )
+                    ],
+                    stop_reason="tool_use",
+                ),
+                usage=first_usage,
+            ),
+            ProviderResponse(
+                message=AssistantMessage(
+                    parts=[TextPart(text="done")], stop_reason="stop"
+                ),
+                usage=second_usage,
+            ),
+        ]
+    )
+    runner = Runner(provider=provider)
+
+    # WHEN `Runner.run` is awaited
+    result = await runner.run(agent, "hello")
+
+    # THEN the aggregated usage is the sum of the recorded responses' usage
+    assert result.usage == first_usage + second_usage
+
+
+# Provider-response recording tests
+# -----------------------------------------------------------------------------
+
+
+async def test_runner_run_collects_provider_responses_per_call() -> None:
+    """`Runner.run` records every call's `ProviderResponse`, in call order."""
+
+    # GIVEN an agent with a tool, and a provider scripted with two responses
+    # (a tool call, then a final text) carrying distinct ids
+    @tool
+    def echo(value: str) -> str:
+        """Echo the value."""
+
+        return value
+
+    agent = Agent(
+        instructions="you are helpful",
+        model_settings=ModelSettings(model="test-model"),
+        tools=[echo],
+    )
+    first_response = ProviderResponse(
+        message=AssistantMessage(
+            parts=[ToolCallPart(call_id="c1", tool_name="echo", args={"value": "hi"})],
+            stop_reason="tool_use",
+        ),
+        response_id="resp-1",
+    )
+    second_response = ProviderResponse(
+        message=AssistantMessage(parts=[TextPart(text="done")], stop_reason="stop"),
+        response_id="resp-2",
+    )
+    provider = StubProvider.from_responses([first_response, second_response])
+    runner = Runner(provider=provider)
+
+    # WHEN `Runner.run` is awaited
+    result = await runner.run(agent, "hello")
+
+    # THEN both calls' responses are recorded in call order
+    assert result.provider_responses == [first_response, second_response]
+
+
 # Result and conversation-threading tests
 # -----------------------------------------------------------------------------
 
@@ -754,6 +843,10 @@ async def test_runner_run_accumulates_warnings_across_iterations() -> None:
 
     # THEN both warnings are collected in iteration order
     assert result.warnings == [first_warning, second_warning]
+
+    # AND they are exactly the recorded provider responses' warnings,
+    # concatenated in call order
+    assert result.warnings == [w for r in result.provider_responses for w in r.warnings]
 
 
 async def test_runner_run_passes_each_warning_to_the_handlers() -> None:

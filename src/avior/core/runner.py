@@ -29,7 +29,7 @@ from avior.core.messages import (
     ToolResultPart,
     UserMessage,
 )
-from avior.core.provider import ModelSettings, Provider
+from avior.core.provider import ModelSettings, Provider, ProviderResponse
 from avior.core.result import RunResult
 from avior.core.tools import Tool
 from avior.core.usage import Usage
@@ -222,8 +222,8 @@ class Runner:
         )
 
         generated: list[Message] = []
-        usages: list[Usage] = []
         warnings: list[RunWarning] = []
+        provider_responses: list[ProviderResponse] = []
         for run_step in range(1, max_iter + 1):
             messages: list[Message] = [*input_messages, *generated]
             response = await self.provider.complete(
@@ -232,10 +232,8 @@ class Runner:
                 tools=agent.tools,
                 system_prompt=system_prompt,
             )
+            provider_responses.append(response)
             message = response.message
-
-            if response.usage is not None:
-                usages.append(response.usage)
 
             # Run warnings through the handlers before the error-stop check, so
             # a degraded response's warnings are observed even if it then fails.
@@ -261,12 +259,16 @@ class Runner:
 
             tool_calls = [p for p in message.parts if isinstance(p, ToolCallPart)]
             if not tool_calls:
+                reported_usage = [
+                    r.usage for r in provider_responses if r.usage is not None
+                ]
                 return RunResult(
                     output=message.text or "",
                     messages=[*input_messages, *generated],
                     new_message_index=len(input_messages),
-                    usage=Usage.sum(usages) if usages else None,
+                    usage=Usage.sum(reported_usage) if reported_usage else None,
                     warnings=warnings,
+                    provider_responses=provider_responses,
                 )
 
             results = [
