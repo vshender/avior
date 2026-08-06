@@ -53,7 +53,7 @@ test:
 
 .PHONY: test-integration
 test-integration:
-	uv run pytest tests/integration
+	uv run pytest tests/integration -n 4
 
 .PHONY: coverage
 coverage:
