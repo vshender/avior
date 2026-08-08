@@ -73,7 +73,7 @@ async def test_runner_dispatches_tool_call_then_returns_final() -> None:
         ]
     )
 
-    # WHEN the runner is invoked
+    # WHEN `Runner.run` is awaited
     result = await Runner(provider=provider).run(_agent(), "please echo hi")
 
     # THEN the final text is returned
@@ -116,7 +116,7 @@ async def test_runner_serializes_base_model_tool_result_as_json() -> None:
         tools=[_GetWeather()],
     )
 
-    # WHEN the runner is invoked
+    # WHEN `Runner.run` is awaited
     result = await Runner(provider=provider).run(agent, "weather in Paris?")
 
     # THEN the model's JSON dump is what gets fed back to the model
@@ -153,7 +153,7 @@ async def test_runner_serializes_other_tool_result_as_json_dump() -> None:
         tools=[_GetWeather()],
     )
 
-    # WHEN the runner is invoked
+    # WHEN `Runner.run` is awaited
     result = await Runner(provider=provider).run(agent, "weather in Paris?")
 
     # THEN the dict is fed back as its JSON dump
@@ -173,7 +173,7 @@ async def test_runner_raises_max_iterations_when_tools_never_settle() -> None:
 
     provider = StubProvider(always_call)
 
-    # WHEN the runner is invoked
+    # WHEN `Runner.run` is invoked
     # THEN it gives up after `max_iter` iterations
     with pytest.raises(MaxIterationsExceeded):
         await Runner(provider=provider).run(_agent(max_iter=3), "go")
@@ -190,7 +190,7 @@ async def test_runner_feeds_error_result_for_unknown_tool() -> None:
         ]
     )
 
-    # WHEN the runner is invoked
+    # WHEN `Runner.run` is awaited
     result = await Runner(provider=provider).run(_agent(), "go")
 
     # THEN the run completes and the unknown call was reported back as an error
@@ -210,7 +210,7 @@ async def test_runner_feeds_error_result_for_invalid_args() -> None:
         ]
     )
 
-    # WHEN the runner is invoked
+    # WHEN `Runner.run` is awaited
     result = await Runner(provider=provider).run(_agent(), "go")
 
     # THEN the validation failure is reported back as an error result
@@ -261,7 +261,7 @@ async def test_runner_threads_deps_and_call_identity_into_tool_ctx() -> None:
         deps_type=_Deps,
     )
 
-    # WHEN the runner is invoked with that deps value
+    # WHEN `Runner.run` is invoked with that deps value
     await Runner(provider=provider).run(agent, "go", deps=deps)
 
     # THEN the tool saw the same deps object and this call's identity
@@ -284,7 +284,8 @@ async def test_runner_requires_deps_when_agent_declares_deps_type() -> None:
         deps_type=_Deps,
     )
 
-    # WHEN `run` is invoked without `deps` (a type error, exercised at runtime)
+    # WHEN `Runner.run` is invoked without `deps` (a type error, exercised
+    # at runtime)
     # THEN it raises before the provider is ever called
     with pytest.raises(MissingDependenciesError, match="deps"):
         await Runner(provider=provider).run(agent, "go")  # type: ignore[arg-type]  # pyright: ignore[reportArgumentType]
@@ -307,7 +308,8 @@ async def test_runner_guard_follows_deps_type_under_wider_annotation() -> None:
         deps_type=_Deps,
     )
 
-    # WHEN run without `deps` (statically allowed for `Agent[object]`)
+    # WHEN `Runner.run` is invoked without `deps` (statically allowed for
+    # `Agent[object]`)
     # THEN the runtime guard still fires
     with pytest.raises(MissingDependenciesError, match="deps"):
         await Runner(provider=provider).run(agent, "go")
@@ -325,7 +327,7 @@ async def test_runner_allows_omitting_deps_for_object_deps_type() -> None:
         deps_type=object,
     )
 
-    # WHEN `run` is invoked without `deps` (the overloads accept this)
+    # WHEN `Runner.run` is awaited without `deps` (the overloads accept this)
     result = await Runner(provider=provider).run(agent, "go")
 
     # THEN it runs instead of raising (no static/runtime contract mismatch)
@@ -368,7 +370,8 @@ async def test_runner_accepts_explicit_none_deps_for_nullable_type() -> None:
         deps_type=_Nullable,
     )
 
-    # WHEN `run` is invoked with an explicit `deps=None` (a valid value here)
+    # WHEN `Runner.run` is awaited with an explicit `deps=None` (a valid
+    # value here)
     result = await Runner(provider=provider).run(agent, "go", deps=None)
 
     # THEN it does not raise; the run completes and the tool received `None`

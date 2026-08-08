@@ -15,7 +15,7 @@ def test_avior_root_logger_has_null_handler_attached() -> None:
     # GIVEN avior.core has been imported (triggers the side-effect setup)
     importlib.import_module("avior.core")
 
-    # WHEN we inspect the top-level avior logger's handlers
+    # WHEN the top-level avior logger's handlers are inspected
     handler_types = [type(h) for h in logging.getLogger("avior").handlers]
 
     # THEN at least one `NullHandler` is attached

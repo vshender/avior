@@ -75,10 +75,10 @@ async def test_runner_run_against_anthropic_returns_non_empty_text(
         model_settings=ModelSettings(model=_MODEL, max_tokens=64),
     )
 
-    # WHEN we run a trivial prompt
+    # WHEN `Runner.run` is awaited with a trivial prompt
     result = await Runner(provider=anthropic_provider).run(agent, "Say hello.")
 
-    # THEN we get a non-empty text response
+    # THEN the result carries a non-empty text response
     assert result.output.strip() != ""
 
 
@@ -125,7 +125,7 @@ async def test_runner_run_against_anthropic_calls_a_tool_end_to_end(
         tools=[tool],
     )
 
-    # WHEN we run a prompt that requires the tool
+    # WHEN `Runner.run` is awaited with a prompt that requires the tool
     result = await Runner(provider=anthropic_provider).run(
         agent, "What is the magic number for Paris?"
     )
@@ -258,7 +258,7 @@ async def test_runner_run_thinking_tool_chain_against_anthropic(
         tools=[tool],
     )
 
-    # WHEN we run a prompt that requires the tool
+    # WHEN `Runner.run` is awaited with a prompt that requires the tool
     result = await Runner(provider=anthropic_provider).run(
         agent, "What is the magic number for Paris?"
     )

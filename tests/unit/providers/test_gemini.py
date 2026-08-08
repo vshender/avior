@@ -1023,7 +1023,7 @@ async def test_complete_raises_on_unsupported_content_part() -> None:
     part = types.Part(inline_data=types.Blob(mime_type="image/png", data=b"x"))
     provider = _provider(_mock_client_returning(_response(part)))
 
-    # WHEN `complete` is awaited
+    # WHEN `complete` is invoked
     # THEN `ProviderResponseValidationError` is raised
     with pytest.raises(ProviderResponseValidationError):
         await provider.complete([UserMessage.from_text("hi")], _settings())
@@ -1920,7 +1920,7 @@ async def test_complete_stamps_placeholder_on_each_unsigned_turn() -> None:
 )
 async def test_complete_rejects_corrupted_signature(corrupted: JsonValue) -> None:
     """A `thought_signature` that is not a string or not valid base64 raises
-    `AviorUsageError` before any request is sent
+    `AviorUsageError` before any request is sent.
     """
 
     # GIVEN a transcript whose Gemini turn carries a corrupted signature
@@ -2172,7 +2172,7 @@ async def test_aclose_closes_self_constructed_client(
     mock_client = AsyncMock()
     provider = _provider_owning(monkeypatch, mock_client)
 
-    # WHEN `aclose` is awaited
+    # WHEN `aclose` is invoked
     await provider.aclose()
 
     # THEN both the async and the sync client pools are closed
@@ -2188,7 +2188,7 @@ async def test_aclose_leaves_user_supplied_client_open() -> None:
     mock_client.close = MagicMock()
     provider = _provider(mock_client)
 
-    # WHEN `aclose` is awaited
+    # WHEN `aclose` is invoked
     await provider.aclose()
 
     # THEN neither client pool is closed

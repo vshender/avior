@@ -30,7 +30,7 @@ async def test_stub_provider_canonical_callable_returns_message_directly() -> No
     response = _assistant_message("hi there")
     provider = StubProvider(lambda _call: response)
 
-    # WHEN `complete` is called
+    # WHEN `complete` is awaited
     result = await provider.complete([UserMessage.from_text("hello")], _settings())
 
     # THEN the message is wrapped in a `ProviderResponse` by identity
@@ -43,7 +43,7 @@ async def test_stub_provider_canonical_callable_wraps_string_responses() -> None
     # GIVEN a stub whose callable returns a plain string
     provider = StubProvider(lambda _call: "hi")
 
-    # WHEN `complete` is called
+    # WHEN `complete` is awaited
     result = await provider.complete([UserMessage.from_text("hello")], _settings())
 
     # THEN the response message carries that text
@@ -63,7 +63,7 @@ async def test_stub_provider_passes_scripted_provider_response_through() -> None
     )
     provider = StubProvider.from_responses([response])
 
-    # WHEN `complete` is called
+    # WHEN `complete` is awaited
     result = await provider.complete([UserMessage.from_text("hello")], _settings())
 
     # THEN the scripted `ProviderResponse` is returned as-is
@@ -79,7 +79,7 @@ async def test_stub_provider_canonical_callable_awaits_coroutine_results() -> No
 
     provider = StubProvider(async_func)
 
-    # WHEN `complete` is called
+    # WHEN `complete` is awaited
     result = await provider.complete([UserMessage.from_text("hello")], _settings())
 
     # THEN the awaited string is wrapped as a `ProviderResponse` message
@@ -100,7 +100,7 @@ async def test_stub_provider_callable_receives_the_recorded_call() -> None:
     messages: list[Message] = [UserMessage.from_text("hi")]
     settings = _settings("claude-3-5-sonnet")
 
-    # WHEN `complete` is called
+    # WHEN `complete` is invoked
     await provider.complete(messages, settings)
 
     # THEN the callable saw the call by identity, and it is the recorded one
@@ -116,7 +116,7 @@ async def test_stub_provider_records_each_call_in_order() -> None:
     # GIVEN a stub that always returns the same response
     provider = StubProvider(lambda _call: "ok")
 
-    # WHEN `complete` is called three times with different messages
+    # WHEN `complete` is invoked three times with different messages
     settings = _settings()
     await provider.complete([UserMessage.from_text("first")], settings)
     await provider.complete([UserMessage.from_text("second")], settings)
@@ -147,7 +147,7 @@ async def test_stub_provider_records_offered_tools() -> None:
     tool = _Ping()
     provider = StubProvider(lambda _call: "ok")
 
-    # WHEN `complete` is called with that tool offered
+    # WHEN `complete` is invoked with that tool offered
     await provider.complete(
         [UserMessage.from_text("hi")],
         _settings(),
@@ -164,7 +164,7 @@ async def test_stub_provider_records_system_prompt() -> None:
     # GIVEN a stub
     provider = StubProvider(lambda _call: "ok")
 
-    # WHEN `complete` is called with a system prompt
+    # WHEN `complete` is invoked with a system prompt
     await provider.complete(
         [UserMessage.from_text("hi")],
         _settings(),
@@ -181,7 +181,7 @@ async def test_stub_provider_from_responses_returns_responses_in_order() -> None
     # GIVEN a stub built from a list of canned responses
     provider = StubProvider.from_responses(["hello", "world"])
 
-    # WHEN `complete` is called twice
+    # WHEN `complete` is awaited twice
     settings = _settings()
     first = await provider.complete([UserMessage.from_text("a")], settings)
     second = await provider.complete([UserMessage.from_text("b")], settings)
@@ -198,7 +198,7 @@ async def test_stub_provider_from_responses_accepts_mixed_str_and_message() -> N
     canned_message = _assistant_message("from message")
     provider = StubProvider.from_responses(["from str", canned_message])
 
-    # WHEN `complete` is called twice
+    # WHEN `complete` is awaited twice
     settings = _settings()
     first = await provider.complete([UserMessage.from_text("a")], settings)
     second = await provider.complete([UserMessage.from_text("b")], settings)
@@ -217,7 +217,7 @@ async def test_stub_provider_from_responses_raises_when_exhausted() -> None:
     settings = _settings()
     await provider.complete([UserMessage.from_text("a")], settings)
 
-    # WHEN `complete` is called a second time
+    # WHEN `complete` is invoked a second time
     # THEN it raises `AssertionError` with a descriptive message
     with pytest.raises(AssertionError, match="exhausted after 1 call"):
         await provider.complete([UserMessage.from_text("b")], settings)
@@ -230,7 +230,7 @@ async def test_stub_provider_from_responses_records_call_on_failure() -> None:
     provider = StubProvider.from_responses(["only one"])
     await provider.complete([UserMessage.from_text("a")], _settings())
 
-    # WHEN `complete` is called once more and raises
+    # WHEN `complete` is invoked once more and raises
     with pytest.raises(AssertionError):
         await provider.complete([UserMessage.from_text("hello")], _settings())
 
@@ -254,7 +254,7 @@ async def test_stub_provider_from_predicates_returns_matching_response() -> None
     )
     settings = _settings()
 
-    # WHEN `complete` is called with messages matching each predicate
+    # WHEN `complete` is awaited with messages matching each predicate
     first = await provider.complete([UserMessage.from_text("ping")], settings)
     second = await provider.complete([UserMessage.from_text("hello")], settings)
 
@@ -274,7 +274,7 @@ async def test_stub_provider_from_predicates_evaluates_in_order() -> None:
         ]
     )
 
-    # WHEN `complete` is called
+    # WHEN `complete` is awaited
     result = await provider.complete([UserMessage.from_text("anything")], _settings())
 
     # THEN the response of the first predicate is returned
@@ -289,7 +289,7 @@ async def test_stub_provider_from_predicates_raises_when_no_match() -> None:
         [(lambda call: call.messages[-1].text == "ping", "pong")]
     )
 
-    # WHEN `complete` is called with a non-matching message
+    # WHEN `complete` is invoked with a non-matching message
     # THEN an `AssertionError` is raised
     with pytest.raises(AssertionError, match="no predicate matched"):
         await provider.complete([UserMessage.from_text("hello")], _settings())
@@ -301,7 +301,7 @@ async def test_stub_provider_from_predicates_records_call_on_failure() -> None:
     # GIVEN a stub whose predicates never match
     provider = StubProvider.from_predicates([(lambda _call: False, "never")])
 
-    # WHEN `complete` is called and raises
+    # WHEN `complete` is invoked and raises
     with pytest.raises(AssertionError):
         await provider.complete([UserMessage.from_text("hello")], _settings())
 

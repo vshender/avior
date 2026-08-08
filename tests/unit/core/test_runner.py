@@ -47,7 +47,7 @@ async def test_runner_run_returns_assistant_text_for_hello_smoke() -> None:
     )
     runner = Runner(provider=StubProvider.from_responses(["Hi!"]))
 
-    # WHEN the runner is invoked with a hello prompt
+    # WHEN `Runner.run` is awaited with a hello prompt
     result = await runner.run(agent, "hello")
 
     # THEN the result's output is the assistant's reply
@@ -141,7 +141,7 @@ async def test_runner_run_accepts_tool_result_matching_a_prior_call() -> None:
     agent = Agent(model_settings=ModelSettings(model="test-model"))
     runner = Runner(provider=StubProvider.from_responses(["Final answer"]))
 
-    # WHEN `Runner.run` is invoked
+    # WHEN `Runner.run` is awaited
     result = await runner.run(agent, history)
 
     # THEN validation passes and the run produces the provider's reply
@@ -203,7 +203,7 @@ async def test_runner_run_accepts_tool_calls_answered_across_messages() -> None:
     agent = Agent(model_settings=ModelSettings(model="test-model"))
     runner = Runner(provider=StubProvider.from_responses(["Final answer"]))
 
-    # WHEN `Runner.run` is invoked
+    # WHEN `Runner.run` is awaited
     result = await runner.run(agent, history)
 
     # THEN validation passes and the run produces the provider's reply
@@ -225,7 +225,7 @@ async def test_runner_run_passes_agent_instructions_as_system_prompt() -> None:
     provider = StubProvider.from_responses(["ok"])
     runner = Runner(provider=provider)
 
-    # WHEN the runner is invoked
+    # WHEN `Runner.run` is invoked
     await runner.run(agent, "hello")
 
     # THEN the instructions are passed as the system prompt, not as a message
@@ -240,7 +240,7 @@ async def test_runner_run_passes_no_system_prompt_when_instructions_omitted() ->
     provider = StubProvider.from_responses(["ok"])
     runner = Runner(provider=provider)
 
-    # WHEN the runner is invoked
+    # WHEN `Runner.run` is invoked
     await runner.run(agent, "hello")
 
     # THEN no system prompt is sent
@@ -266,7 +266,7 @@ async def test_runner_run_normalizes_blank_instructions_to_none(
     provider = StubProvider.from_responses(["ok"])
     runner = Runner(provider=provider)
 
-    # WHEN the runner is invoked
+    # WHEN `Runner.run` is invoked
     await runner.run(agent, "hello")
 
     # THEN the provider receives no system prompt
@@ -288,7 +288,7 @@ async def test_runner_run_sends_only_the_user_message_as_input() -> None:
     provider = StubProvider.from_responses(["ok"])
     runner = Runner(provider=provider)
 
-    # WHEN the runner is invoked with a specific prompt
+    # WHEN `Runner.run` is invoked with a specific prompt
     await runner.run(agent, "what is 2+2?")
 
     # THEN exactly one message is sent: the user prompt (no system prompt in
@@ -311,7 +311,7 @@ async def test_runner_run_passes_agent_model_settings_to_provider() -> None:
     provider = StubProvider.from_responses(["ok"])
     runner = Runner(provider=provider)
 
-    # WHEN the runner is invoked
+    # WHEN `Runner.run` is invoked
     await runner.run(agent, "hello")
 
     # THEN the provider receives the same settings object by identity
@@ -498,7 +498,7 @@ async def test_runner_run_accepts_normal_stop_reason() -> None:
     )
     runner = Runner(provider=StubProvider.from_responses([normal]))
 
-    # WHEN `Runner.run` is invoked
+    # WHEN `Runner.run` is awaited
     result = await runner.run(agent, "hello")
 
     # THEN the assistant's text is returned as the output
@@ -525,7 +525,7 @@ async def test_runner_run_carries_usage_from_provider_response() -> None:
     )
     runner = Runner(provider=StubProvider.from_responses([response]))
 
-    # WHEN the runner is invoked
+    # WHEN `Runner.run` is awaited
     result = await runner.run(agent, "hello")
 
     # THEN the run result carries that usage
@@ -542,7 +542,7 @@ async def test_runner_run_usage_is_none_when_provider_reports_none() -> None:
     )
     runner = Runner(provider=StubProvider.from_responses(["Hi!"]))
 
-    # WHEN the runner is invoked
+    # WHEN `Runner.run` is awaited
     result = await runner.run(agent, "hello")
 
     # THEN the result's usage is `None`
@@ -652,7 +652,7 @@ async def test_runner_run_result_excludes_system_prompt_marks_new_turn() -> None
     )
     runner = Runner(provider=StubProvider.from_responses(["Hi!"]))
 
-    # WHEN the runner is invoked with a string prompt
+    # WHEN `Runner.run` is awaited with a string prompt
     result = await runner.run(agent, "hello")
 
     # THEN the transcript is the input user turn followed by the assistant
@@ -692,7 +692,7 @@ async def test_runner_run_accepts_message_list_input() -> None:
         UserMessage.from_text("how are you?"),
     ]
 
-    # WHEN the runner is invoked with that transcript as input
+    # WHEN `Runner.run` is awaited with that transcript as input
     result = await runner.run(agent, history)
 
     # THEN the provider receives the whole input as the conversation, with the
@@ -721,7 +721,8 @@ async def test_runner_run_threads_result_messages_into_next_run() -> None:
     provider = StubProvider.from_responses(["A1", "A2"])
     runner = Runner(provider=provider)
 
-    # WHEN a first run is continued by threading its messages plus a new turn
+    # WHEN two runs are awaited, the second threading the first's messages
+    # plus a new turn
     first = await runner.run(agent, "Q1")
     second = await runner.run(agent, [*first.messages, UserMessage.from_text("Q2")])
 

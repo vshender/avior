@@ -432,7 +432,7 @@ async def test_complete_raises_on_unsupported_content_block() -> None:
     )
     provider = _provider(_mock_client_returning(response))
 
-    # WHEN `complete` is awaited
+    # WHEN `complete` is invoked
     # THEN `ProviderResponseValidationError` is raised
     with pytest.raises(ProviderResponseValidationError):
         await provider.complete([UserMessage.from_text("hi")], _settings())
@@ -701,7 +701,7 @@ async def test_complete_raises_on_pause_turn_stop_reason() -> None:
     response = _response_with_stop_reason("pause_turn")
     provider = _provider(_mock_client_returning(response))
 
-    # WHEN `complete` is awaited
+    # WHEN `complete` is invoked
     # THEN it fails loud instead of returning a partial answer
     with pytest.raises(ProviderResponseValidationError, match="pause_turn"):
         await provider.complete([UserMessage.from_text("hi")], _settings())
@@ -1073,7 +1073,7 @@ async def test_complete_keeps_budget_thinking_that_fits_explicit_max_tokens() ->
     # WHEN `complete` is awaited
     result = await provider.complete([UserMessage.from_text("hi")], settings)
 
-    # THEN the budget thinking is sent and no warning is raised
+    # THEN the budget thinking is sent and no warning is recorded
     call_kwargs = mock_client.messages.create.call_args.kwargs
     assert call_kwargs["thinking"] == {"type": "enabled", "budget_tokens": 16384}
     assert result.warnings == []
@@ -1256,7 +1256,7 @@ async def test_complete_forwards_accepted_temperature(
     # WHEN `complete` is awaited
     result = await provider.complete([UserMessage.from_text("hi")], settings)
 
-    # THEN the temperature is sent and no sampling warning is raised
+    # THEN the temperature is sent and no sampling warning is recorded
     assert mock_client.messages.create.call_args.kwargs["temperature"] == temperature
     assert [w for w in result.warnings if w.setting_name == "temperature"] == []
 
@@ -1515,7 +1515,7 @@ async def test_aclose_closes_self_constructed_client(
     mock_client = AsyncMock()
     provider = _provider_owning(monkeypatch, mock_client)
 
-    # WHEN `aclose` is awaited
+    # WHEN `aclose` is invoked
     await provider.aclose()
 
     # THEN the underlying client is closed
@@ -1529,7 +1529,7 @@ async def test_aclose_leaves_user_supplied_client_open() -> None:
     mock_client = AsyncMock()
     provider = _provider(mock_client)
 
-    # WHEN `aclose` is awaited
+    # WHEN `aclose` is invoked
     await provider.aclose()
 
     # THEN the caller-owned client is left alone

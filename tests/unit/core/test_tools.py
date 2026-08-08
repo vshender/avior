@@ -28,8 +28,9 @@ async def test_tool_coerces_args_via_args_model_then_executes() -> None:
     # GIVEN a tool whose args model has integer fields
     tool = _Add()
 
-    # WHEN raw arguments (a string among them) are validated and the tool runs
+    # WHEN raw arguments (a string among them) are validated
     args = tool.args_model.model_validate({"a": "2", "b": 3})
+    # AND `execute` is awaited
     ctx = RunContext[object](deps=None, tool_name="add", tool_call_id="c1", run_step=1)
     result = await tool.execute(ctx, args)
 

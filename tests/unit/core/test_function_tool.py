@@ -262,7 +262,7 @@ def test_tool_warns_on_docstring_param_not_in_signature() -> None:
 
     # GIVEN a function whose docstring documents a misspelled parameter
     # WHEN it is wrapped as a tool
-    # THEN a warning is raised rather than the entry silently dropped
+    # THEN a warning is emitted rather than the entry silently dropped
     with pytest.warns(UserWarning, match="not in its signature"):
 
         @tool
@@ -299,7 +299,7 @@ def test_tool_documenting_ctx_param_does_not_warn(
     # WHEN its arguments schema is read
     schema = get_weather.args_model.model_json_schema()
 
-    # THEN no warning is raised (`ctx` is a real parameter, just not a field),
+    # THEN no warning is recorded (`ctx` is a real parameter, just not a field),
     assert len(recwarn) == 0
     # AND `ctx` is kept out of the schema (it is the run context, not an arg)
     assert "ctx" not in schema["properties"]
@@ -446,7 +446,7 @@ def test_tool_annotated_return_survives_unresolvable_self() -> None:
     # GIVEN a bound method with an annotated return whose `self` annotation
     # cannot be resolved at runtime (a forward ref to a missing type - the
     # scenario `@tool` already supports for parameters).  Inject it directly to
-    # avoid a source-level forward ref the type checkers would flag.
+    # avoid a source-level forward ref the type checkers would flag
     class Service:
         def fetch(
             self, n: int
@@ -611,7 +611,7 @@ async def test_tool_dispatches_sync_function_end_to_end() -> None:
         tools=[echo],
     )
 
-    # WHEN the runner is invoked
+    # WHEN `Runner.run` is awaited
     result = await Runner(provider=provider).run(agent, "echo hi")
 
     # THEN the run completes and the tool's result was captured
@@ -642,7 +642,7 @@ async def test_tool_injects_run_context_with_deps_end_to_end() -> None:
         deps_type=Deps,
     )
 
-    # WHEN the runner is invoked with a deps value
+    # WHEN `Runner.run` is awaited with a deps value
     result = await Runner(provider=provider).run(
         agent, "token?", deps=Deps(token="secret")
     )
@@ -739,7 +739,7 @@ async def test_tool_passes_positional_only_parameter_positionally() -> None:
         tools=[shout],
     )
 
-    # WHEN the runner is invoked
+    # WHEN `Runner.run` is awaited
     result = await Runner(provider=provider).run(agent, "go")
 
     # THEN the parameter is in the schema and was passed positionally (no error)
@@ -902,7 +902,8 @@ async def test_tool_passes_validated_model_instance_not_dict() -> None:
     not the raw dict from the model.
     """
 
-    # GIVEN a tool whose argument is itself a Pydantic model
+    # GIVEN a tool whose argument is itself a Pydantic model, and a provider
+    # scripting a tool call with the nested-dict form of that argument
     class Point(BaseModel):
         x: int
         y: int
@@ -922,7 +923,7 @@ async def test_tool_passes_validated_model_instance_not_dict() -> None:
         tools=[plot],
     )
 
-    # WHEN the runner dispatches the call with a nested-dict argument
+    # WHEN `Runner.run` is awaited
     result = await Runner(provider=provider).run(agent, "go")
 
     # THEN the function received a `Point` instance, not the raw dict

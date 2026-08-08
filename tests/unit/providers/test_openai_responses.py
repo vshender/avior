@@ -823,7 +823,7 @@ async def test_complete_raw_reasoning_option_overrides_portable_thinking() -> No
     """A raw `reasoning` provider option overrides the portable mapping.
 
     It is sent in place of the portable value, which is not consulted - so the
-    warning that value would otherwise raise never arises.
+    warning the portable value would otherwise trigger is never recorded.
     """
 
     # GIVEN settings whose portable `thinking` would warn (disable on a
@@ -921,7 +921,7 @@ async def test_complete_requests_encrypted_reasoning_for_raw_option() -> None:
         provider_options={"openai": {"reasoning": {"effort": "high"}}},
     )
 
-    # WHEN `complete` is awaited
+    # WHEN `complete` is invoked
     await provider.complete([UserMessage.from_text("hi")], settings)
 
     # THEN encrypted reasoning content is requested despite the unknown model
@@ -942,7 +942,7 @@ async def test_complete_omits_encrypted_reasoning_when_disabled() -> None:
     provider = _provider(mock_client)
     settings = _settings(model="gpt-5.1", thinking=False)
 
-    # WHEN `complete` is awaited
+    # WHEN `complete` is invoked
     await provider.complete([UserMessage.from_text("hi")], settings)
 
     # THEN reasoning is disabled
@@ -984,7 +984,7 @@ async def test_complete_omits_prior_reasoning_item_when_disabled() -> None:
     ]
     settings = _settings(model="gpt-5.1", thinking=False)
 
-    # WHEN `complete` is awaited
+    # WHEN `complete` is invoked
     await provider.complete(history, settings)
 
     # THEN the prior reasoning item is not echoed back
@@ -1000,7 +1000,7 @@ async def test_complete_rejects_invalid_openai_provider_options() -> None:
     provider = _provider(mock_client)
     settings = _settings(provider_options={"openai": {"unknown": 1}})
 
-    # WHEN `complete` is awaited
+    # WHEN `complete` is invoked
     # THEN it raises `AviorUsageError` before any request is sent
     with pytest.raises(AviorUsageError):
         await provider.complete([UserMessage.from_text("hi")], settings)
@@ -1027,7 +1027,7 @@ async def test_complete_raises_on_unsupported_output_item() -> None:
     )
     provider = _provider(_mock_client_returning(response))
 
-    # WHEN `complete` is awaited
+    # WHEN `complete` is invoked
     # THEN `ProviderResponseValidationError` is raised
     with pytest.raises(ProviderResponseValidationError):
         await provider.complete([UserMessage.from_text("hi")], _settings())
@@ -1993,7 +1993,7 @@ async def test_aclose_closes_self_constructed_client(
     mock_client = AsyncMock()
     provider = _provider_owning(monkeypatch, mock_client)
 
-    # WHEN `aclose` is awaited
+    # WHEN `aclose` is invoked
     await provider.aclose()
 
     # THEN the underlying client is closed
@@ -2007,7 +2007,7 @@ async def test_aclose_leaves_user_supplied_client_open() -> None:
     mock_client = AsyncMock()
     provider = _provider(mock_client)
 
-    # WHEN `aclose` is awaited
+    # WHEN `aclose` is invoked
     await provider.aclose()
 
     # THEN the caller-owned client is left alone
