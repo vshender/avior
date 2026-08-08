@@ -277,10 +277,17 @@ class StubProvider(Provider):
                 `ProviderResponse`.
 
         Returns:
-            A `ProviderResponse` ready to be returned from `Provider.complete`,
-            with no call metadata (usage, response id).  The message built from
-            the `str` form is tagged with the stub's `provider_name`; the
-            `AssistantMessage` and `ProviderResponse` forms are used as given.
+            A `ProviderResponse` ready to be returned from `Provider.complete`:
+
+            - the `str` form is wrapped as a single-`TextPart` assistant
+              message tagged with the stub's `provider_name`;
+            - the `AssistantMessage` form is wrapped unchanged in a
+              `ProviderResponse`;
+            - the `ProviderResponse` form is returned as given, with whatever
+              metadata the test scripted.
+
+            Both wraps carry no call metadata (for example usage or the
+            response id).
         """
 
         if isinstance(response, str):

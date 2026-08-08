@@ -242,8 +242,8 @@ class GeminiProvider(Provider):
     """Async adapter to the Gemini Developer API.
 
     Translates avior's canonical `Message` shape to and from Gemini's
-    `Content` shape.  Gemini's wire format diverges from the OpenAI-style
-    convention in a few ways the adapter absorbs:
+    `Content` shape.  Gemini's wire format diverges from the canonical shape
+    in a few ways the adapter absorbs:
 
     - the assistant role is `"model"`, not `"assistant"`;
     - tool calls and results are `function_call` / `function_response` parts,
@@ -314,9 +314,11 @@ class GeminiProvider(Provider):
 
         The portable `settings` map to Gemini's request as follows:
 
-        - `temperature` and `max_output_tokens` - forwarded only when explicitly
-          set on `settings`.  Gemini accepts a custom `temperature` with
-          thinking active, so none is dropped.
+        - `max_tokens` - sent as `max_output_tokens`, only when explicitly
+          set on `settings`; otherwise the model's own default applies.
+        - `temperature` - forwarded only when explicitly set on `settings`.
+          Gemini accepts a custom `temperature` with thinking active, so none
+          is dropped.
         - `thinking` - the portable setting maps to the chosen model's native
           `thinking_config`:
 
@@ -363,14 +365,14 @@ class GeminiProvider(Provider):
                 (an unknown key or a value of the wrong type), or a transcript
                 part carries a corrupted `thought_signature`; raised before
                 the request is sent.
+            ProviderConnectionError: Network-level failure (DNS / TCP / TLS /
+                timeout) - no HTTP response was received.
             ProviderHTTPError: The provider returned a 4xx or 5xx HTTP response.
                 `status_code` carries the wire status.
             ProviderResponseValidationError: The provider returned a successful
                 response that could not be decoded (typically an outdated
                 `google-genai` package) or that carries a content part the
                 adapter does not support.
-            ProviderConnectionError: Network-level failure (DNS / TCP / TLS /
-                timeout) - no HTTP response was received.
 
         Errors translated from a Gemini SDK exception preserve it as
         `__cause__`; validation errors avior detects in an otherwise
@@ -602,7 +604,7 @@ class GeminiProvider(Provider):
         usage: types.GenerateContentResponseUsageMetadata | None,
     ) -> Usage | None:
         """Map Gemini's usage metadata to the canonical `Usage`, or `None` when
-        the response carried no usage metadata.
+        the response carries no usage metadata.
 
         - `input_tokens`: `prompt_token_count` plus
           `tool_use_prompt_token_count` (tokens from tool-execution results fed
@@ -690,6 +692,10 @@ class GeminiProvider(Provider):
         - `OTHER` / `FINISH_REASON_UNSPECIFIED` / `IMAGE_OTHER` -> `"error"`:
           not a clean stop, so surfaced loudly rather than as a successful
           response.
+
+        Every known `finish_reason` is handled; an unknown value (added by a
+        newer `google-genai`) trips `assert_never`, both statically and at
+        runtime, so it gets an explicit mapping instead of a silent default.
         """
 
         if prompt_blocked:

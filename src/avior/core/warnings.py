@@ -65,7 +65,8 @@ class UnsupportedSettingRunWarning(BaseModel):
 type RunWarning = UnsupportedSettingRunWarning
 """A non-fatal problem found during a run.
 
-Currently a single kind, `UnsupportedSettingRunWarning`.
+An alias rather than the class itself: a new warning kind joins here as a
+discriminated union member, without changing consumer annotations.
 """
 
 

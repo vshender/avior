@@ -111,7 +111,7 @@ class Usage(BaseModel):
         return self.input_tokens + self.output_tokens
 
     def __add__(self, other: object) -> "Usage":
-        """Aggregate two usages element-wise.
+        """Aggregate two usages field-wise.
 
         Totals and the cache sub-slices add directly.  `reasoning_tokens` uses
         unknown-aware addition: `None` means the provider did not itemize
@@ -141,7 +141,9 @@ class Usage(BaseModel):
     def sum(cls, usages: Iterable["Usage"]) -> "Usage":
         """Aggregate an iterable of usages into one snapshot.
 
-        Returns a zero-token `Usage` when `usages` is empty.
+        Returns:
+            The field-wise sum of `usages` under `Usage.__add__`, or a
+            zero-token `Usage` when `usages` is empty.
         """
 
         total: Usage | None = None

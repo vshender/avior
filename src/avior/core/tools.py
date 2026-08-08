@@ -137,9 +137,15 @@ class Tool(ABC, Generic[Args, Result, Deps]):
     async def execute(self, ctx: RunContext[Deps], args: Args) -> Result:
         """Run the tool with validated `args` and return its result.
 
-        `ctx` is the read-only run context: it carries the run's `deps` and the
-        identity of this tool call.  `args` is the validated, coerced arguments
-        object - an instance of `args_model`, never a raw dict.
+        Args:
+            ctx: The read-only run context: the run's `deps` and the identity
+                of this tool call.
+            args: The validated, coerced arguments - an instance of
+                `args_model`, never a raw dict.
+
+        Returns:
+            The tool's result, which the runner serializes and feeds back to
+            the model.
         """
 
 
@@ -206,11 +212,21 @@ class FunctionTool[Result, Deps](Tool[Any, Result, Deps]):
     async def execute(self, ctx: RunContext[Deps], args: BaseModel) -> Result:
         """Call the wrapped function with the validated arguments.
 
-        The runner has already validated and coerced the LLM's raw arguments
-        through `args_model`, so `args` is a typed model instance.
         Positional-only parameters are passed positionally and the rest by
         keyword; the context is prepended only if the function declared it.
         A sync function runs inline; an async one is awaited.
+
+        Args:
+            ctx: The read-only run context.  Prepended as the wrapped
+                function's first argument when `takes_ctx` is set, and
+                ignored otherwise - a function that declared no context
+                parameter is called without one.
+            args: The arguments the runner has already validated and coerced
+                through `args_model` - a typed model instance, never a raw
+                dict.
+
+        Returns:
+            The wrapped function's return value.
         """
 
         fields = {name: getattr(args, name) for name in type(args).model_fields}
@@ -396,23 +412,53 @@ def tool(
     into the description, since the tool-call protocol has no separate slot for
     it.
 
-    Three optional keyword parameters configure the tool, each usable both as a
-    parameterized decorator (`@tool(name=...)`, which returns the decorator) and
-    in a direct call (`tool(func, name=...)`):
-
-    - `name` overrides the tool name that otherwise comes from the function's
-      `__name__`; an empty `name` is rejected, since the LLM addresses a tool by
-      name;
-    - `description` overrides the description that otherwise comes from the
-      docstring; an explicit `description=""` clears it;
-    - `docstring_format` pins the docstring style (`google` / `numpy` /
-      `sphinx`); the default `auto` detects it.
-
     A `sphinx` docstring is a ReST field list, which does not delimit what
     follows it: text after the last field (`:param:` / `:returns:` / `:raises:`)
     is read as part of that field's description.  Keep narrative in the summary
     and body, before the field list.  (`sphinx` also has no `Examples` section;
     examples are a `google` / `numpy` concept.)
+
+    A docstring `Args` entry that names no parameter emits a `UserWarning`:
+    the entry the author meant to attach to a parameter would otherwise be
+    silently dropped.
+
+    Args:
+        func: The function to wrap; sync or async.  Omit it for the
+            parameterized-decorator form (`@tool(name=...)`); the keyword
+            parameters also work in a direct call (`tool(func, name=...)`).
+        name: The tool name; defaults to the function's `__name__`.
+        description: The tool description; defaults to one rendered from the
+            docstring.  An explicit `description=""` clears it.
+        docstring_format: The docstring style (`google` / `numpy` /
+            `sphinx`); the default `auto` detects it.
+
+    Returns:
+        The `FunctionTool` for `func`, or - when called without a function -
+        the decorator that builds it.
+
+    Raises:
+        ConfigurationError: The call does not map to a tool:
+
+            - an empty `name` (the LLM addresses a tool by name);
+            - an unknown `docstring_format`;
+            - a non-function such as a `functools.partial` or a callable
+              object;
+            - a `self`/`cls` first parameter (an unbound method);
+            - a `RunContext` parameter that is not first or is keyword-only;
+            - `*args` / `**kwargs` (a variadic has no fixed name or type to
+              become a schema field);
+            - a parameter name starting with `_` (Pydantic reads it as a
+              private attribute and silently drops the field);
+            - a `model_`-prefixed parameter name that shadows a `BaseModel`
+              attribute (Pydantic's reserved namespace);
+            - a parameter annotation that names an unknown or unimportable
+              type.
+
+            The context parameter is matched by type, so its own name may
+            start with `_`.
+
+    Pydantic model-build errors (for example an invalid `Field` or an
+    unsupported parameter type) propagate as themselves.
     """
 
     def make(func: Callable[..., object], /) -> FunctionTool[Any, Any]:
@@ -475,27 +521,41 @@ def _build_args_model(
 ) -> tuple[type[BaseModel], str | None, tuple[str, ...]]:
     """Derive a tool's arguments model from a function signature.
 
-    Returns three values:
-
-    - the generated model;
-    - the name of the run-context parameter, or `None` if the function takes
-      none;
-    - the names of its positional-only parameters, in order, to pass them
-      positionally.
-
     `Annotated[T, Field(...)]` metadata (such as a parameter description) is
     carried onto the model field.  A parameter with no annotation is typed
     `Any`; one with a default keeps it, so the field is not required.
 
-    Raises `ConfigurationError` for a signature that does not map to a tool: a
-    `self`/`cls` first parameter (an unbound method), a `RunContext` parameter
-    that is not first or is keyword-only, `*args` / `**kwargs`, an argument name
-    starting with `_`, or a `model_`-prefixed name that shadows a `BaseModel`
-    attribute (Pydantic's reserved namespace).  The context parameter is matched
-    by type, so its own name may start with `_`.
+    Returns:
+        Three values:
 
-    Other Pydantic model-build errors (an invalid `Field`, an unsupported type)
-    are left to propagate as themselves, not reinterpreted as a name conflict.
+        - the generated model;
+        - the name of the run-context parameter, or `None` if the function
+          takes none;
+        - the names of the positional-only parameters, in order, to pass them
+          positionally.
+
+    Raises:
+        ConfigurationError: The signature does not map to a tool:
+
+            - a non-function such as a `functools.partial` or a callable
+              object;
+            - a `self`/`cls` first parameter (an unbound method);
+            - a `RunContext` parameter that is not first or is keyword-only;
+            - `*args` / `**kwargs` (a variadic has no fixed name or type to
+              become a schema field);
+            - a parameter name starting with `_` (Pydantic reads it as a
+              private attribute and silently drops the field);
+            - a `model_`-prefixed parameter name that shadows a `BaseModel`
+              attribute (Pydantic's reserved namespace);
+            - a parameter annotation that names an unknown or unimportable
+              type.
+
+            The context parameter is matched by type, so its own name may
+            start with `_`.
+
+    Other Pydantic model-build errors (for example an invalid `Field` or an
+    unsupported type) are left to propagate as themselves, not reinterpreted as
+    a name conflict.
     """
 
     if not (inspect.isfunction(func) or inspect.ismethod(func)):
@@ -849,6 +909,11 @@ def _resolve_param_hints(func: Callable[..., object]) -> dict[str, Any]:
 
     `Annotated[T, Field(...)]` metadata on a parameter is preserved, so a
     `Field(description=...)` reaches the LLM-facing schema.
+
+    Raises:
+        ConfigurationError: A parameter annotation names a type that is not
+            importable at module scope (a local or `TYPE_CHECKING`-only type)
+            or is misspelled.
     """
 
     # A shim carrying only the parameter annotations, so the function's own

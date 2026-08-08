@@ -7,8 +7,8 @@ run's dependencies (`deps`) and the identity of the current tool call.
 The context exposes no operations of its own - no I/O, no clock, no method that
 acts on the run.  Anything live a tool needs, like a database or HTTP client,
 comes through `deps`, supplied per run.  So the context itself adds no coupling
-to a particular runtime, which lets the same tool run unchanged on a durable
-backend that can pause a run and resume it later.
+to a particular runtime, which keeps the same tool portable across run
+backends.
 """
 
 from dataclasses import dataclass
@@ -63,12 +63,11 @@ class RunContext(Generic[Deps]):
     """The run's dependencies, of the type the agent declared.
 
     Live and supplied per run.  Read-only by contract: nothing stops a tool from
-    mutating the object's contents, but mutating them is not portable.  A local
-    run reuses one `deps` object, so changes persist (and leak back to the
-    caller); a durable substrate reconstructs `deps` per run rather than
-    restoring it, so changes are lost.  Treating `deps` as read-only keeps a
-    tool's behavior the same on every backend.  `deps` is input the run reads,
-    not a place to accumulate state.
+    mutating the object's contents, but mutating them is not portable.  A
+    backend may reuse one `deps` object across the run or rebuild it per step,
+    so a mutation may persist, leak back to the caller, or be lost.  Treating
+    `deps` as read-only keeps a tool's behavior the same on every backend.
+    `deps` is input the run reads, not a place to accumulate state.
     """
 
     tool_name: str

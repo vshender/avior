@@ -31,6 +31,10 @@ class Agent(Generic[Deps]):
     supplies them per run via `Runner.run(..., deps=...)`.  Declare the type by
     passing `deps_type`; left off, `Deps` is inferred from the tools - `object`
     when they need no deps, `None` when there are no tools.
+
+    Construction raises `ConfigurationError` when two tools share a name -
+    tool calls are dispatched by name, so names must be unique within an
+    agent.
     """
 
     instructions: str | None = None

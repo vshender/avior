@@ -124,7 +124,7 @@ class ToolResultOk(BaseModel):
 @final
 class ToolResultError(BaseModel):
     """A failed tool call - the tool was missing, its arguments were invalid, or
-    `execute` raised.
+    `Tool.execute` raised.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -261,7 +261,11 @@ class UserMessage(BaseModel):
 
     @property
     def text(self) -> str | None:
-        """Concatenated text of all parts, or `None` if there are no parts."""
+        """Concatenated text of all parts, or `None` if there are no parts.
+
+        Derived from `parts`, which is the canonical content; part boundaries
+        are not preserved.
+        """
 
         return "".join(p.text for p in self.parts) if self.parts else None
 

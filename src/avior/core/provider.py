@@ -176,9 +176,9 @@ class ModelCapabilities:
 class Provider(ABC):
     """Adapter to an LLM service.
 
-    Stateless wrapper around an SDK client.  Subclasses convert the canonical
-    `Message` / `Part` shape into the provider's wire format and back.
-    Implementations should be safe to share across concurrent runs.
+    Stateless wrapper around a provider SDK client.  Subclasses convert the
+    canonical `Message` / `Part` shape into the provider's wire format and
+    back.  Implementations should be safe to share across concurrent runs.
 
     Lifecycle: release resources held by the provider with either `await
     provider.aclose()` or `async with provider: ...`.  Nested `async with` on
@@ -244,20 +244,33 @@ class Provider(ABC):
         Raises:
             EmptyInputError: The transcript has a user message with no content
                 (`UserMessage.is_empty`); raised before the request is sent.
+            AviorUsageError: A provider-specific fault in the settings or the
+                transcript, detected before the request is sent - an invalid
+                `provider_options` slice, or a violated invariant the provider
+                expects of the transcript (for example a Gemini
+                `thought_signature` that is no longer valid base64).
+            ProviderConnectionError: Network-level failure (DNS / TCP / TLS /
+                timeout) - no HTTP response was received.
+            ProviderHTTPError: The provider returned a 4xx or 5xx HTTP
+                response.  `status_code` carries the wire status.
+            ProviderResponseValidationError: An unrepresentable response: it
+                needs a capability avior does not have (an unsupported content
+                kind, a continuation avior cannot resume), or its envelope
+                cannot be decoded by the provider SDK.  No valid canonical
+                transcript can be built from it, so the adapter raises at the
+                point of detection.
+            ProviderError: Any other failure the provider SDK signals through
+                its own exception types, translated with the SDK exception
+                preserved as `__cause__`.  An adapter whose SDK has no common
+                exception base (for example the Gemini SDK) may let an
+                unrecognized SDK error propagate untranslated.
 
-        Fault handling is split by class, uniformly across adapters:
-
-        - An *unrepresentable response* raises `ProviderResponseValidationError`
-          at the point of detection: the response needs a capability avior
-          does not have (an unsupported content kind, a continuation avior
-          cannot resume), or its envelope cannot be decoded by the provider
-          SDK.  No valid canonical transcript can be built from it, so the
-          adapter raises immediately.
-        - *Degenerate model output* is classified, not raised: the response is
-          representable, but the model produced no usable result (an abnormal
-          provider finish, a malformed or missing tool call).  The message
-          carries `stop_reason="error"` with the cause in `stop_detail`, and
-          the runner is the single raise point for this class.
+        Degenerate model output is classified, not raised - the counterpart of
+        the unrepresentable-response class above, uniform across adapters: the
+        response is representable, but the model produced no usable result
+        (for example an abnormal provider finish, or a malformed or missing
+        tool call).  The message carries `stop_reason="error"` with the cause in
+        `stop_detail`, and the runner is the single raise point for this class.
         """
 
     @abstractmethod

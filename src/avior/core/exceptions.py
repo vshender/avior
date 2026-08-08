@@ -256,9 +256,9 @@ class ConfigurationError(AviorUsageError):
 class MissingDependenciesError(AviorUsageError):
     """A deps-typed agent was run without the `deps` it declared.
 
-    `Runner.run` raises this before any model call when the agent declares a
-    concrete `deps_type` but no `deps` argument is supplied.  Pass `deps`, or
-    drop `deps_type` if the agent needs none; see `Agent.deps_type`.
+    Raised before any model call when the agent declares a concrete
+    `deps_type` but no `deps` argument is supplied.  Pass `deps`, or drop
+    `deps_type` if the agent needs none; see `Agent.deps_type`.
     """
 
 

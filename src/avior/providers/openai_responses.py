@@ -244,22 +244,26 @@ def _reasons_by_default(model: str) -> bool:
 def _rule_matches(model: str, prefix: str | None, variant: str | None) -> bool:
     """Check whether `model` matches a `(prefix, variant)` rule.
 
-    A rule names a `prefix` (a model family or version) and an optional
-    `variant` (a qualifier such as `mini` or `codex`).  `model` matches when it
-    decomposes, in order, into:
-
-    - `prefix` - `model` must equal it or start with `prefix` + `-` (so `gpt-5`
-      matches `gpt-5` and `gpt-5-mini` but not `gpt-5.1`, which uses `.`).  A
-      `None` prefix matches any family.  The prefix normally marks where the
-      variant starts, so without one the variant is searched for from the end of
-      `model`.
-    - `variant` - the part after the prefix, matched in full: `(None, "codex")`
-      does not match `gpt-5.1-codex-max`.  A `None` variant requires nothing
-      after the prefix but a version tail.
-    - a version tail - what may trail the variant: nothing, `latest`, or a dated
-      snapshot (`2025-11-13`).
-
     A rule must have a prefix or a variant; `(None, None)` matches nothing.
+    `model` matches when it decomposes, in order, into the `prefix`, the
+    `variant`, and a version tail - nothing, `latest`, or a dated snapshot
+    (`2025-11-13`).
+
+    Args:
+        model: The model id to test.
+        prefix: A model family or version, such as `o3` or `gpt-5.1`.
+            `model` must equal it or start with `prefix` + `-` (so `gpt-5`
+            matches `gpt-5` and `gpt-5-mini` but not `gpt-5.1`, which uses
+            `.`).  A `None` prefix matches any family.  The prefix normally
+            marks where the variant starts, so without one the variant is
+            searched for from the end of `model`.
+        variant: A qualifier such as `mini` or `codex`, matched in full after
+            the prefix: `(None, "codex")` does not match `gpt-5.1-codex-max`.
+            A `None` variant requires nothing after the prefix but a version
+            tail.
+
+    Returns:
+        Whether `model` decomposes into the rule's parts.
     """
 
     # Prefix: strip it from the front.  With no prefix the family length is
@@ -448,15 +452,16 @@ class OpenAIResponsesProvider(Provider):
             AviorUsageError: The `openai` `provider_options` slice is invalid
                 (an unknown key or a value of the wrong type); raised before
                 the request is sent.
+            ProviderConnectionError: Network-level failure (DNS / TCP / TLS /
+                timeout) - no HTTP response was received.
             ProviderHTTPError: The provider returned a 4xx or 5xx HTTP response.
                 `status_code` carries the wire status.
             ProviderResponseValidationError: The provider returned a successful
                 response that could not be decoded (typically an outdated
                 `openai` package), or that carries an output item the adapter
                 does not support.
-            ProviderConnectionError: Network-level failure (DNS / TCP / TLS /
-                timeout) - no HTTP response was received.
-            ProviderError: Any other unexpected failure from the OpenAI SDK.
+            ProviderError: Any other error the OpenAI SDK raises from its own
+                exception hierarchy.
 
         Errors translated from an OpenAI SDK exception preserve it as
         `__cause__`; validation errors avior detects in an otherwise successful
@@ -877,7 +882,8 @@ class OpenAIResponsesProvider(Provider):
         - otherwise -> `"stop"`.
 
         Every `Response.status` is handled; an unknown value (added by a newer
-        `openai`) trips `assert_never`.
+        `openai`) trips `assert_never`, both statically and at runtime, so it
+        gets an explicit mapping instead of a silent default.
         """
 
         match response.status:
@@ -919,8 +925,8 @@ class OpenAIResponsesProvider(Provider):
         the schema guides the model but is not grammar-enforced, so the raw
         Pydantic schema (optional fields, defaults, open objects) is accepted
         unchanged.  This keeps the adapter symmetric with the Anthropic one;
-        strict mode would require a lossy schema rewrite and is a separate
-        opt-in.
+        strict mode would require a lossy schema rewrite, so it is not
+        enabled.
         """
 
         return FunctionToolParam(

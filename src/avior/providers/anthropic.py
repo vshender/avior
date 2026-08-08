@@ -105,7 +105,7 @@ type _ThinkingMode = Literal["adaptive", "always_on", "budget"]
 - `"adaptive"` - `thinking={"type": "adaptive"}`, with depth set through
   `output_config.effort`; turn it off with `{"type": "disabled"}`.
 - `"always_on"` - adaptive thinking that cannot be turned off, so a request to
-  disable it is dropped and the model keeps reasoning.
+  disable it is dropped and the model keeps thinking.
 - `"budget"` - legacy `thinking={"type": "enabled", "budget_tokens": N}`; the
   model accepts neither adaptive thinking nor `output_config.effort`.
 """
@@ -125,7 +125,7 @@ _THINKING_MODES: Final[dict[str, _ThinkingMode]] = {
 """Thinking mode per model, keyed by model-id prefix so a dated snapshot (such
 as `claude-haiku-4-5-20251001`) resolves to the same mode as its alias.  The
 prefixes are disjoint, so match order does not matter.  A model matching none of
-them does not support thinking.
+them is not treated as a thinking model.
 """
 
 
@@ -163,7 +163,8 @@ _THINKING_BUDGET_TOKENS: Final[dict[Literal[True, "low", "medium", "high"], int]
     "medium": 10000,
     "high": 16384,
 }
-"""`budget_tokens` for each portable thinking level on a budget-mode model.
+"""`budget_tokens` for each enabling portable thinking value (`True` or a
+level) on a budget-mode model.
 
 The value must stay under the request's `max_tokens`; an unset `max_tokens`
 defaults high enough (see `_MAX_NONSTREAMING_TOKENS`) that every level fits.
@@ -288,9 +289,9 @@ class AnthropicProvider(Provider):
     def model_capabilities(self, model: str) -> ModelCapabilities:
         """Report what `model` supports.
 
-        Reports `supports_thinking=True` for any model with a known thinking
-        mode - adaptive, always-on, or legacy budget - and the conservative
-        default otherwise.
+        Reports `supports_thinking=True` for a recognized thinking model - one
+        that `_thinking_mode` classifies - and the conservative default
+        otherwise.
         """
 
         return ModelCapabilities(
@@ -310,20 +311,32 @@ class AnthropicProvider(Provider):
 
         The portable `settings` map to Anthropic's request as follows:
 
-        - `max_tokens` - falls back to the model's maximum non-streaming
-          output when `settings.max_tokens is None`.
+        - `max_tokens` - falls back to the largest output the Anthropic SDK
+          serves without streaming when `settings.max_tokens is None`.
         - `temperature` - forwarded only when explicitly set on `settings`.
           A value other than `1` is dropped, with an
           `UnsupportedSettingRunWarning`, when the model does not accept a
           custom `temperature`, or when thinking is active for the request -
           Anthropic rejects such a value in either case.
         - `thinking` - the portable setting maps to the chosen model's native
-          config: an adaptive model to `{"type": "adaptive"}` with an
-          `output_config.effort`, a budget model to `{"type": "enabled",
-          "budget_tokens": N}`.  A request the model cannot honor is dropped,
-          with an `UnsupportedSettingRunWarning` on the response: the model
-          does not support thinking, its thinking is always on and cannot be
-          disabled, or a budget does not fit an explicit `max_tokens`.
+          config:
+
+          - a level (`low` / `medium` / `high`) becomes an
+            `output_config.effort` on an adaptive or always-on model, and a
+            `budget_tokens` count on a budget model;
+          - `True` sends `{"type": "adaptive"}` with no effort on an adaptive
+            or always-on model - the model chooses its depth - and the
+            `medium` budget on a budget model;
+          - `False` sends `{"type": "disabled"}` on an adaptive or budget
+            model; on a model avior does not treat as thinking nothing is
+            sent - it is already off.
+
+          A request the model cannot honor is dropped, with an
+          `UnsupportedSettingRunWarning` on the response: enabling thinking on
+          a model avior does not treat as thinking, disabling it on an
+          always-on model, or a budget that does not fit an explicit
+          `max_tokens`.
+
           `provider_options["anthropic"]` overrides this mapping; see
           `AnthropicProviderOptions`.
 
@@ -348,6 +361,8 @@ class AnthropicProvider(Provider):
             AviorUsageError: The `anthropic` `provider_options` slice is invalid
                 (an unknown key or a value of the wrong type); raised before
                 the request is sent.
+            ProviderConnectionError: Network-level failure (DNS / TCP / TLS /
+                timeout) - no HTTP response was received.
             ProviderHTTPError: The provider returned a 4xx or 5xx HTTP response.
                 `status_code` carries the wire status.
             ProviderResponseValidationError: The provider returned a successful
@@ -355,12 +370,10 @@ class AnthropicProvider(Provider):
                 `anthropic` package), or whose decoded content avior cannot
                 accept as a finished assistant turn (for example an unsupported
                 content block, or a turn Anthropic paused for continuation).
-            ProviderConnectionError: Network-level failure (DNS / TCP / TLS /
-                timeout) - no HTTP response was received.
             ProviderError: A request the Anthropic SDK refuses to send without
                 streaming (a large `max_tokens` risking the 10-minute
-                non-streaming limit), or any other unexpected failure from the
-                Anthropic SDK.
+                non-streaming limit), or any other error the Anthropic SDK
+                raises from its own exception hierarchy.
 
         Errors translated from an Anthropic SDK exception preserve it as
         `__cause__`; validation errors avior detects in an otherwise successful
@@ -555,15 +568,17 @@ class AnthropicProvider(Provider):
         - `"end_turn"` / `"stop_sequence"` / `None` -> `"stop"` (normal
           completion).
 
-        `"pause_turn"` is rejected: it marks a turn Anthropic paused mid-flight
-        (long-running server tools), to be resumed by sending the partial
-        assistant content back unchanged.  avior has no continuation path, so
-        treating it as a normal stop would surface a half-finished turn as the
-        final answer.
-
         Every known `stop_reason` is handled; an unknown value (added by a
         newer `anthropic`) trips `assert_never`, both statically and at runtime,
         so it gets an explicit mapping instead of a silent default.
+
+        Raises:
+            ProviderResponseValidationError: The stop reason is `"pause_turn"`,
+                which marks a turn Anthropic paused mid-flight (long-running
+                server tools), to be resumed by sending the partial assistant
+                content back unchanged.  avior has no continuation path, so
+                treating it as a normal stop would surface a half-finished
+                turn as the final answer.
         """
 
         match response.stop_reason:
@@ -864,7 +879,7 @@ class AnthropicProvider(Provider):
         A reasoning block round-trips only to the provider that produced it: the
         opaque token is provider-specific, and Anthropic rejects a foreign or
         modified block.  Returns `None` - dropping the part - when the turn came
-        from a different provider, or carries no token to echo.
+        from a different provider, or the part carries no token to echo.
         """
 
         if message.provider_name != self.name:

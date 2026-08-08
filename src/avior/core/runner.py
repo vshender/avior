@@ -154,15 +154,28 @@ class Runner:
             max_iter: Maximum loop iterations; defaults to `agent.max_iter`.
 
         Returns:
-            A `RunResult` for the run.
+            The completed run's `RunResult` - the final output, the full
+            transcript, and the call metadata collected along the way.
 
         Raises:
-            MissingDependenciesError: `deps_type` is set but `deps` is missing.
+            MissingDependenciesError: The agent declares a concrete `deps_type`
+                but `deps` is missing.
             EmptyInputError: The input carries no content to send.
             UnansweredToolCallError: A tool call in the input has no matching
                 tool result.
             OrphanedToolResultError: A tool result references a tool call absent
                 from the input.
+            AviorUsageError: The provider found a provider-specific fault in
+                the settings or the transcript - an invalid `provider_options`
+                slice, or a violated invariant the provider expects of the
+                transcript (for example a Gemini `thought_signature` that is
+                no longer valid base64); raised before the request is sent.
+            ProviderError: A model call failed - a connection failure, an HTTP
+                error status, or a response avior could not decode or
+                represent.  Propagates from the provider unchanged; see the
+                `ProviderError` subclasses.  An adapter whose SDK has no
+                common exception base may let an unrecognized SDK error
+                propagate untranslated (see `Provider.complete`).
             ContentFilterError: An external content filter blocked the response.
             MaxTokensExceededError: Output was truncated by the token budget.
             ModelRefusalError: The model itself declined to answer.
@@ -287,16 +300,23 @@ class Runner:
     def _validate_input(messages: list[Message]) -> None:
         """Reject caller input that violates avior's input contract.
 
-        Raised before the first model call, so a contract violation surfaces at
+        Runs before the first model call, so a contract violation surfaces at
         the call site as a clear avior usage error rather than reaching the
         model, where the same fault might fail opaquely on one backend or be
-        silently accepted as a meaningless run on another.  Each fault raises
-        the matching `InvalidInputError` subclass.
+        silently accepted as a meaningless run on another.  Every fault raises
+        an `InvalidInputError` subclass.
 
         Only faults that hold regardless of the model API are checked; how each
         model API constrains transcript shape (role ordering, alternation) is
         enforced by that API and surfaced through the `Provider`, not checked
         here.
+
+        Raises:
+            EmptyInputError: The input has no messages, or has a message with
+                no content to send.
+            UnansweredToolCallError: A tool call has no matching tool result.
+            OrphanedToolResultError: A tool result references a tool call
+                absent from the input.
         """
 
         if not messages:
