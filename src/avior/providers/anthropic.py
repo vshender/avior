@@ -119,6 +119,7 @@ _THINKING_MODES: Final[dict[str, _ThinkingMode]] = {
     "claude-opus-4-6": "adaptive",
     "claude-opus-4-7": "adaptive",
     "claude-opus-4-8": "adaptive",
+    "claude-opus-5": "adaptive",
     "claude-fable-5": "always_on",
     "claude-mythos-5": "always_on",
 }
@@ -126,6 +127,10 @@ _THINKING_MODES: Final[dict[str, _ThinkingMode]] = {
 as `claude-haiku-4-5-20251001`) resolves to the same mode as its alias.  The
 prefixes are disjoint, so match order does not matter.  A model matching none of
 them is not treated as a thinking model.
+
+The modes are seeded from probing the live Anthropic API; the `claude-mythos-5`
+row is from Anthropic's published model documentation (this model is
+access-gated).
 """
 
 
@@ -188,6 +193,7 @@ _NO_CUSTOM_SAMPLING_MODELS: Final = frozenset(
         "claude-sonnet-5",
         "claude-opus-4-7",
         "claude-opus-4-8",
+        "claude-opus-5",
         "claude-fable-5",
         "claude-mythos-5",
     }
